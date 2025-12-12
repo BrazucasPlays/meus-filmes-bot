@@ -1,87 +1,83 @@
 import os
 import tempfile
 import time
-import re
 import urllib.parse
 
-from dotenv import load_dotenv
-
 from telegram import Update
-from telegram.ext import Updater, MessageHandler, Filters, CallbackContext
+from telegram.ext import (
+    ApplicationBuilder,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
 import firebase_admin
 from firebase_admin import credentials, db, storage
 
-# --------------------
-# Carregar variáveis de ambiente
-# --------------------
-load_dotenv()
+# =========================
+# CONFIGURAÇÃO
+# =========================
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL")
 FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET")
-ALLOWED_CHAT_ID = os.getenv("TELEGRAM_GROUP_ID")  # pode ser vazio
+ALLOWED_CHAT_ID = os.getenv("TELEGRAM_GROUP_ID")  # opcional
 
 if not BOT_TOKEN:
-    raise RuntimeError("Defina TELEGRAM_BOT_TOKEN no .env")
-
+    raise RuntimeError("Defina TELEGRAM_BOT_TOKEN")
 if not FIREBASE_DB_URL:
-    raise RuntimeError("Defina FIREBASE_DB_URL no .env")
-
+    raise RuntimeError("Defina FIREBASE_DB_URL")
 if not FIREBASE_STORAGE_BUCKET:
-    raise RuntimeError("Defina FIREBASE_STORAGE_BUCKET no .env")
+    raise RuntimeError("Defina FIREBASE_STORAGE_BUCKET")
 
-# --------------------
-# Inicializar Firebase Admin
-# --------------------
-cred = credentials.Certificate("firebase-key.json")
-firebase_admin.initialize_app(
-    cred,
-    {
-        "databaseURL": FIREBASE_DB_URL,
-        "storageBucket": FIREBASE_STORAGE_BUCKET,
-    },
-)
+# =========================
+# FIREBASE INIT
+# =========================
+
+if not firebase_admin._apps:
+    cred = credentials.Certificate("firebase-key.json")
+    firebase_admin.initialize_app(
+        cred,
+        {
+            "databaseURL": FIREBASE_DB_URL,
+            "storageBucket": FIREBASE_STORAGE_BUCKET,
+        },
+    )
 
 bucket = storage.bucket()
 
-# --------------------
-# Memória temporária de filmes por chat
-# --------------------
-# Estrutura:
-# pending_movies[chat_id] = {
-#   "created_at": timestamp,
-#   "poster_file_id": str,
-#   "metadata_text": str,
-#   "video_file_id": str,
-#   "video_is_document": bool
-# }
+# =========================
+# MEMÓRIA TEMPORÁRIA
+# =========================
+
 pending_movies = {}
 
+# =========================
+# HELPERS
+# =========================
 
-# --------------------
-# Funções auxiliares para parsing
-# --------------------
+def _check_chat(update: Update) -> bool:
+    if not ALLOWED_CHAT_ID:
+        return True
+    try:
+        return str(update.effective_chat.id) == str(ALLOWED_CHAT_ID)
+    except:
+        return False
+
+
 def extract_field(text: str, label: str):
-    """Pega o campo depois de 'Título:' / 'Diretor:' etc."""
     idx = text.lower().find(label.lower())
     if idx == -1:
         return None
-    rest = text[idx + len(label) :]
-
-    # corta em algum separador comum
+    rest = text[idx + len(label):]
     for sep in ["\n", "🎙", "📆", "⭐", "Sinopse:", "SINOPSE:"]:
         pos = rest.find(sep)
         if pos != -1:
             rest = rest[:pos]
-    return rest.strip(" -:|\n\r\t")
+    return rest.strip(" -:\n\r\t")
 
 
 def parse_metadata(text: str):
-    """Recebe o texto completo e devolve um dicionário com os campos."""
-    data = {}
-
-    # normalizar emojis em quebras de linha pra facilitar
     norm = (
         text.replace("🎬", "\n")
         .replace("🎙", "\n")
@@ -90,220 +86,136 @@ def parse_metadata(text: str):
         .replace("⭐", "\n")
     )
 
-    data["title"] = extract_field(norm, "Título:") or extract_field(
-        norm, "Titulo:"
-    )
-    data["director"] = extract_field(norm, "Diretor:") or extract_field(
-        norm, "Director:"
-    )
-    data["audio"] = extract_field(norm, "Áudio:") or extract_field(
-        norm, "Audio:"
-    )
-    data["year"] = extract_field(norm, "Lançamento:") or extract_field(
-        norm, "Ano:"
-    )
-    data["genres"] = extract_field(norm, "Gêneros:") or extract_field(
-        norm, "Generos:"
-    )
+    data = {
+        "title": extract_field(norm, "Título:") or extract_field(norm, "Titulo:"),
+        "director": extract_field(norm, "Diretor:"),
+        "audio": extract_field(norm, "Áudio:") or extract_field(norm, "Audio:"),
+        "year": extract_field(norm, "Lançamento:") or extract_field(norm, "Ano:"),
+        "genres": extract_field(norm, "Gêneros:") or extract_field(norm, "Generos:"),
+        "synopsis": None,
+    }
 
-    # Sinopse: pega tudo depois de "Sinopse:"
-    sinopse_idx = norm.lower().find("sinopse:")
-    if sinopse_idx != -1:
-        data["synopsis"] = norm[sinopse_idx + len("sinopse:") :].strip()
-    else:
-        data["synopsis"] = None
+    idx = norm.lower().find("sinopse:")
+    if idx != -1:
+        data["synopsis"] = norm[idx + len("sinopse:"):].strip()
 
     return data
 
 
 def build_download_url(blob):
-    """Gera URL pública usando o endpoint padrão do Firebase Storage."""
     path = urllib.parse.quote(blob.name, safe="")
     return f"https://firebasestorage.googleapis.com/v0/b/{bucket.name}/o/{path}?alt=media"
 
+# =========================
+# HANDLERS
+# =========================
 
-# --------------------
-# Lógica do BOT
-# --------------------
-def _check_chat(update: Update):
-    chat_id = update.effective_chat.id
-    if ALLOWED_CHAT_ID:
-        try:
-            allowed = int(ALLOWED_CHAT_ID)
-        except ValueError:
-            allowed = ALLOWED_CHAT_ID
-        return chat_id == allowed
-    return True  # aceita qualquer chat se não configurar
-
-
-def handle_photo(update: Update, context: CallbackContext):
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _check_chat(update):
         return
 
     chat_id = update.effective_chat.id
-    message = update.effective_message
+    photo = update.message.photo[-1]
 
-    photo = message.photo[-1]  # melhor qualidade
-    file_id = photo.file_id
+    pending_movies[chat_id] = {
+        "poster_file_id": photo.file_id,
+        "created_at": time.time(),
+    }
 
+    await update.message.reply_text(
+        "✅ Capa recebida.\nAgora envie o TEXTO do filme e depois o VÍDEO."
+    )
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _check_chat(update):
+        return
+
+    text = update.message.text.lower()
+    if "título" not in text and "titulo" not in text:
+        return
+
+    chat_id = update.effective_chat.id
     pending = pending_movies.get(chat_id, {})
-    pending["poster_file_id"] = file_id
-    pending["created_at"] = time.time()
+    pending["metadata_text"] = update.message.text
     pending_movies[chat_id] = pending
 
-    message.reply_text("✅ Capa recebida. Agora envie o texto do filme e depois o vídeo.")
+    await update.message.reply_text(
+        "📝 Texto recebido.\nAgora envie o ARQUIVO DE VÍDEO (mp4 ou mkv)."
+    )
 
 
-def handle_text(update: Update, context: CallbackContext):
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _check_chat(update):
         return
 
     chat_id = update.effective_chat.id
-    message = update.effective_message
-    text = message.text or ""
-
-    # só nos interessa se tiver "Título" e "Sinopse"
-    if "título" not in text.lower() and "titulo" not in text.lower():
-        return
-
-    pending = pending_movies.get(chat_id, {})
-    pending["metadata_text"] = text
-    pending["created_at"] = time.time()
-    pending_movies[chat_id] = pending
-
-    message.reply_text("📝 Informações do filme recebidas. Agora envie o arquivo de vídeo (mp4, mkv, etc.).")
-
-
-def handle_video_or_document(update: Update, context: CallbackContext):
-    if not _check_chat(update):
-        return
-
-    chat_id = update.effective_chat.id
-    message = update.effective_message
-
-    video = message.video
-    document = message.document
-
-    file_obj = None
-    is_document = False
-
-    if video:
-        file_obj = video
-        is_document = False
-    elif document and document.mime_type.startswith("video/"):
-        file_obj = document
-        is_document = True
-    else:
-        return  # não é vídeo
-
     pending = pending_movies.get(chat_id)
+
     if not pending:
-        message.reply_text(
-            "⚠️ Primeiro envie a CAPA (imagem) e o TEXTO com Título/Diretor/Sinopse, depois o vídeo."
+        await update.message.reply_text(
+            "⚠️ Envie primeiro: CAPA → TEXTO → VÍDEO"
         )
         return
 
-    pending["video_file_id"] = file_obj.file_id
-    pending["video_is_document"] = is_document
+    video = update.message.video or update.message.document
+    pending["video_file_id"] = video.file_id
     pending_movies[chat_id] = pending
 
-    message.reply_text("📥 Recebi o vídeo, estou salvando no Firebase...")
-
-    try:
-        save_movie_to_firebase(context, chat_id)
-        message.reply_text("✅ Filme salvo no Firebase! Ele já deve aparecer no app em alguns instantes.")
-    except Exception as e:
-        message.reply_text(f"❌ Erro ao salvar filme: {e}")
+    await update.message.reply_text("📥 Salvando no Firebase...")
+    await save_movie(context, chat_id)
+    await update.message.reply_text("✅ Filme salvo! Já aparece no app.")
 
 
-def save_movie_to_firebase(context: CallbackContext, chat_id):
+async def save_movie(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     pending = pending_movies.get(chat_id)
     if not pending:
-        raise RuntimeError("Nada pendente para este chat.")
+        return
 
-    if not (
-        pending.get("poster_file_id")
-        and pending.get("metadata_text")
-        and pending.get("video_file_id")
-    ):
-        raise RuntimeError("Capa, texto ou vídeo faltando. Envie na ordem: capa -> texto -> vídeo.")
+    metadata = parse_metadata(pending.get("metadata_text", ""))
+    metadata["title"] = metadata.get("title") or "Filme sem título"
 
-    metadata = parse_metadata(pending["metadata_text"])
+    ref = db.reference("movies").push()
+    movie_id = ref.key
 
-    # se mesmo assim não tiver título, tenta pegar do nome do vídeo (caption ou file_name)
-    title = metadata.get("title")
-    if not title:
-        metadata["title"] = "Filme sem título"
+    # POSTER
+    poster_file = await context.bot.get_file(pending["poster_file_id"])
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+        await poster_file.download_to_drive(f.name)
+        blob = bucket.blob(f"movies/{movie_id}/poster.jpg")
+        blob.upload_from_filename(f.name)
+    poster_url = build_download_url(blob)
 
-    # criar id no Realtime Database
-    movies_ref = db.reference("movies")
-    new_movie_ref = movies_ref.push()
-    movie_id = new_movie_ref.key
+    # VIDEO
+    video_file = await context.bot.get_file(pending["video_file_id"])
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+        await video_file.download_to_drive(f.name)
+        blob = bucket.blob(f"movies/{movie_id}/video.mp4")
+        blob.upload_from_filename(f.name)
+    video_url = build_download_url(blob)
 
-    # 1) baixar e subir CAPA
-    bot = context.bot
+    ref.set({
+        **metadata,
+        "posterUrl": poster_url,
+        "videoUrl": video_url,
+        "createdAt": int(time.time() * 1000),
+    })
 
-    poster_file = bot.get_file(pending["poster_file_id"])
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_poster:
-        poster_file.download(custom_path=tmp_poster.name)
-        poster_blob = bucket.blob(f"movies/{movie_id}/poster.jpg")
-        poster_blob.upload_from_filename(tmp_poster.name)
-    poster_url = build_download_url(poster_blob)
-
-    # 2) baixar e subir VÍDEO
-    video_file = bot.get_file(pending["video_file_id"])
-    # tenta manter extensão
-    ext = ".mp4"
-    if pending.get("video_is_document") and video_file.file_path:
-        # file_path geralmente contém a extensão
-        parts = video_file.file_path.split(".")
-        if len(parts) > 1:
-            ext = "." + parts[-1]
-
-    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp_video:
-        video_file.download(custom_path=tmp_video.name)
-        video_blob = bucket.blob(f"movies/{movie_id}/video{ext}")
-        video_blob.upload_from_filename(tmp_video.name)
-    video_url = build_download_url(video_blob)
-
-    # 3) salvar metadados no Realtime Database
-    now_ms = int(time.time() * 1000)
-
-    new_movie_ref.set(
-        {
-            "title": metadata.get("title"),
-            "director": metadata.get("director"),
-            "audio": metadata.get("audio"),
-            "year": metadata.get("year"),
-            "genres": metadata.get("genres"),
-            "synopsis": metadata.get("synopsis"),
-            "posterUrl": poster_url,
-            "videoUrl": video_url,
-            "createdAt": now_ms,
-        }
-    )
-
-    # limpar pendente
     pending_movies.pop(chat_id, None)
 
+# =========================
+# MAIN
+# =========================
 
 def main():
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    dp.add_handler(MessageHandler(Filters.photo & ~Filters.command, handle_photo))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
-    dp.add_handler(
-        MessageHandler(
-            (Filters.video | Filters.document.video) & ~Filters.command,
-            handle_video_or_document,
-        )
-    )
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
 
-    print("Bot rodando... CTRL+C para parar.")
-    updater.start_polling()
-    updater.idle()
-
+    print("🤖 BOT ONLINE 24H - escutando mensagens")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
