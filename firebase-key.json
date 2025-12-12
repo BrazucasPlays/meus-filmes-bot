@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "meus-filmes-drive",
+  "private_key_id": "a3cbd40f85f90593be5ebe6420f30845a86b2504",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDbRa2teMkCRS+w\nmz/bb6dKlmWHhxjaFuGKVz6c0yk2Q+oB2xxL+cp+Wm9yvFH7hxLCZnurLv6vNtAz\nqRzIzX/X90KeupIcXhrqV3t9tHrdXKPD2HVeN0rOHS0588PEHhBkbvkVzE8pbzhL\nmT/5LQUVsPc+e/YjTSvOEw+3eIqcrVTPnvpxG4dcj1WLduetk1eoy5Vh55LNfi71\n5eeIzqZVmVqdmd5RGWDvIBKOms0c6VmHRsaxOd/zSpEpIkOCRsmwcKy4dKNcG2fJ\n0/5MDdRtQKl9QP6U13fZcvFs0p02hfi5jl13GkEaufP6W+UoM5LTixQuE0Whs4P8\nJKGCHrUpAgMBAAECggEADPwBzlwbhGu7aLkGHYTtl6BIpS9jUdrOrUYAT6y+FoK2\nszhvOF0zgqrxSY6MSO7qi0zNSvRD9vUx0V//c9vzaO2xP2arQKHJSeeMnljXI7pD\nelVG50wykk+uU22zbIQekradlQ8IVbBKhEjavch5h3DMxfb05YnsK6OmUnDWvcih\nE43IWM51yyT9eYkk2bIiXK8ZyOsAH7P2FEUggIFtZ+1H/gf3XHlbp7n1UzX3YgLx\nOq3eh94WT+v9VNTGPCWDhDjlsgE3ICUEUR5g2LPBTz8OXYtFwhBN6xd2N9yNnmd7\n7oSvQ3P28yUQgIjGkVapBTV/Rx82wu0PxutUyDG3zwKBgQD4IDAaZCdoy+RSZnPw\nq30CUf0LL3c1qrRyQdeJERzWo5Yy/MUmM9FnoE1SJRQq2R2z7Dn00ly2VXaWe4PT\nVWvKUT2BElzVbmq+DQDxonLpdkoGzF7zEm9wDhjB1eJhYsswC/4gUrH3viSXsDZl\nS/Q4gbr689S+N7ccZbJHWVk46wKBgQDiOxRr5BcCJjFD/2dRBGtFT3+D++v9qOlk\njv34Puc3StdkZ9Qnk9mjdaiE/Qbi0wGq4sffT9UizK0p+eDy4Ser3cglurlYOQjy\n8zX6Q4+uVOJ/bQonY/hlgTnuMl4WzSjH3T+kzCchXldxRWPAvZdymnjv+CttwVuI\n+nQsyNYFOwKBgQC2qzu+si0xQan9399LN3T42FNqgK9KmzntQ/vhtO9+NUDGmMCr\nt0pa9/D0oMeQI/dyFl80lgobUh/T+Wq7kw+gCt80vsgJeRisgfZH7kibB7LH/n2I\nhfH0lOw1B7l56LmdzbZxJXBP63QVGG1zdc9+KkP1rLzarTnpdhUh4e2FsQKBgD9s\nOrRolH64wFUE1C0lZQFgYSpaRPWvFgdoAxFGaUHaDHqMlTCnRXuK77ygxv5uE2iZ\n/VjAo8sGwIElGYhd0OZg3cyeBXoTO0wJHRfVOwGvsHPy2MbkQu4KBXiezDvuNkGZ\n6E7GIS48qZ0KzAVr4XpyjfcQhvRVIdlMBafMghujAoGAFJoF4ieleBe1MYX0Ww0u\n/eL04zMZ78xry7bzGmJ/Ve4Sedn8T51yVwT9YOLDvJbo5TGW82AI4+16uXPN4Kut\no6byKLtYCQbdJKeM9FN4W/d+ebvNX9WBhtmepdKqI+mKpvFjZjvTc7Iwi9rJKr6M\nsppzjdyuZhBOD7pGknb5Gd8=\n-----END PRIVATE KEY-----\n",
+  "client_email": "firebase-adminsdk-fbsvc@meus-filmes-drive.iam.gserviceaccount.com",
+  "client_id": "105059432498040888214",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40meus-filmes-drive.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
