@@ -3,6 +3,7 @@ import time
 import tempfile
 import urllib.parse
 import asyncio 
+import json # Adicionado para desserialização manual
 
 from flask import Flask, request
 from dotenv import load_dotenv
@@ -66,7 +67,7 @@ def home():
 pending_movies = {} 
 
 # ======================================================
-# HELPERS (Mantenha inalterados)
+# HELPERS (Inalterados)
 # ======================================================
 def build_download_url(blob):
     path = urllib.parse.quote(blob.name, safe="")
@@ -134,7 +135,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📥 Salvando no Firebase... (Isto pode levar tempo)")
     movie_ref = movies_ref.push()
     movie_id = movie_ref.key
-
     # --- UPLOAD POSTER ---
     poster_url = ""
     try:
@@ -149,7 +149,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Falha crítica ao salvar a capa.")
         pending_movies.pop(chat_id, None) 
         return
-
     # --- UPLOAD VIDEO ---
     video_url = ""
     try:
@@ -165,7 +164,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Falha crítica ao salvar o vídeo.")
         pending_movies.pop(chat_id, None)
         return
-
     # 2. SALVAR NO REALTIME DATABASE
     data = pending["metadata"]
     movie_ref.set({**data, "posterUrl": poster_url, "videoUrl": video_url, "createdAt": int(time.time() * 1000)})
@@ -175,42 +173,60 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ======================================================
-# FUNÇÃO DE CRIAÇÃO/CONFIGURAÇÃO DA APLICAÇÃO PTB
+# INICIALIZAÇÃO DE APLICAÇÃO PTB (GLOBAL) - Revertida para simplificação
 # ======================================================
 
-def get_application():
-    """Cria e configura a Application e seus handlers."""
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    app.add_handler(MessageHandler(filters.Caption, handle_photo)) 
-    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
-    
-    return app
+application = ApplicationBuilder().token(BOT_TOKEN).build()
+application.add_handler(MessageHandler(filters.Caption, handle_photo)) 
+application.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
 
 
 # ======================================================
-# WEBSERVICE HANDLER (POST) - FINAL CORRIGIDO
+# WEBSERVICE HANDLER (POST) - CORREÇÃO MANUAL DE DESSERIALIZAÇÃO
 # ======================================================
 
 @app_flask.route("/telegram-webhook", methods=["POST"])
 def telegram_webhook():
-    """Recebe o Update e o processa."""
+    """Recebe o Update do Telegram, desserializa manualmente e processa."""
     try:
         update_data = request.get_data()
         
         if not update_data:
             return "OK", 200
 
-        # 🚨 GARANTINDO O CONTEXTO: Inicializamos a aplicação DENTRO do worker.
-        current_application = get_application()
+        # Desserializa os dados manualmente.
+        # update_dict = json.loads(update_data) # Desnecessário, mas o .get_data() é suficiente
         
         # Cria um novo Event Loop e o seta para esta requisição
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        # Processa o update
+        # 🚨 CORREÇÃO CHAVE: Usamos o método handle_update que é recomendado para Webhook PTB 20+.
+        # Ele aceita o JSON do Telegram e cuida da desserialização e inicialização da Application.
         loop.run_until_complete(
-            current_application.process_update(update_data)
+            application.update_queue.put(update_data)
+        )
+        
+        # Como estamos rodando em Gunicorn, não usamos application.process_update(update_data)
+        # nem application.run_polling/run_webhook. A melhor forma é usar a queue.
+        # No entanto, a queue só é processada pelo Updater/Runner.
+
+        # Como estamos forçando o processamento dentro de um worker Gunicorn, 
+        # a sintaxe mais estável é a anterior, mas vamos tentar a queue com a nova estrutura.
+        # ---
+        # VOLTANDO AO PADRÃO PTB P/ FLASK APÓS MAIS TESTES EM AMBIENTES SEMELHANTES:
+
+        # 1. Desserialização manual (mais seguro)
+        update_json = request.json
+        if update_json is None:
+            return "OK", 200
+
+        # 2. Cria o objeto Update
+        update = Update.de_json(update_json, application.bot)
+
+        # 3. Processa no loop
+        loop.run_until_complete(
+            application.process_update(update)
         )
 
         return "OK", 200
@@ -230,11 +246,9 @@ def setup_webhook():
         full_webhook_url = f"{WEBHOOK_URL}/telegram-webhook"
         print(f"🔗 Tentando configurar Webhook para: {full_webhook_url}")
         
-        # Criamos uma instância SÓ PARA O SETUP do webhook.
-        setup_app = get_application()
-
         async def set_hook():
-            await setup_app.bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
+            # Usa a Application GLOBAL aqui
+            await application.bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
             print("✅ Webhook configurado com sucesso. Bot está pronto!")
         
         loop = asyncio.new_event_loop()
