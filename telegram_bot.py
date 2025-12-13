@@ -1,12 +1,10 @@
 import os
-import threading
 import time
 import tempfile
 import urllib.parse
-import asyncio # Import necessário para a solução do erro do Event Loop
+import asyncio 
 
-from flask import Flask
-
+from flask import Flask, request # Adicionado 'request'
 from dotenv import load_dotenv
 
 from telegram import Update
@@ -23,22 +21,21 @@ from firebase_admin import credentials, db, storage
 # ======================================================
 # ENV & INIT
 # ======================================================
-# Carrega variáveis de ambiente
 load_dotenv()
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL")
 FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET")
 ALLOWED_CHAT_ID = os.getenv("TELEGRAM_GROUP_ID") 
+# RENDER_EXTERNAL_URL deve ser definido nas variáveis de ambiente do Render (ex: https://seu-bot.onrender.com)
+WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL") 
 
-# Validação de variáveis de ambiente
-if not all([BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_STORAGE_BUCKET, ALLOWED_CHAT_ID]):
-    raise RuntimeError("Variáveis de ambiente incompletas. Verifique BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_STORAGE_BUCKET e TELEGRAM_GROUP_ID.")
+if not all([BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_STORAGE_BUCKET, ALLOWED_CHAT_ID, WEBHOOK_URL]):
+    raise RuntimeError("Variáveis de ambiente incompletas. Verifique BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_STORAGE_BUCKET, TELEGRAM_GROUP_ID e RENDER_EXTERNAL_URL.")
 
 # Inicialização ÚNICA do Firebase
 if not firebase_admin._apps:
     try:
-        # Certifique-se que 'firebase-key.json' está na raiz do projeto
         cred = credentials.Certificate("firebase-key.json") 
         firebase_admin.initialize_app(
             cred,
@@ -56,15 +53,14 @@ bucket = storage.bucket()
 movies_ref = db.reference("movies") 
 
 # ======================================================
-# FLASK (Keep-Alive para Render Free)
-# Variável global app_flask é usada pelo Gunicorn
+# FLASK (Ponto de entrada do Gunicorn e Keep-Alive)
 # ======================================================
 app_flask = Flask(__name__)
 
 @app_flask.route("/")
 def home():
     # Mensagem de saúde para o ping do Render
-    return "🤖 Bot online 24h", 200
+    return "🤖 Bot online (Webhook mode)", 200
 
 # ======================================================
 # MEMÓRIA TEMPORÁRIA
@@ -73,6 +69,7 @@ pending_movies = {}
 
 # ======================================================
 # HELPERS
+# ... (Mantenha build_download_url, check_chat e parse_metadata inalterados)
 # ======================================================
 def build_download_url(blob):
     """Gera uma URL de acesso público para o arquivo no Firebase Storage."""
@@ -114,9 +111,12 @@ def parse_metadata(text: str):
         "year": get("Lançamento"),
         "genres": get("Gêneros"),
     }
+# ======================================================
+
 
 # ======================================================
 # HANDLERS (LÓGICA AUTOMÁTICA)
+# ... (Mantenha handle_photo e handle_video inalterados)
 # ======================================================
 
 # Handler 1: Processa a imagem (foto ou documento) e a legenda (metadata)
@@ -210,7 +210,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     video_url = ""
     try:
         video_file = await context.bot.get_file(file_id)
-        # Tenta preservar a extensão original do arquivo
         ext = "." + file.file_name.split(".")[-1] if file.file_name and "." in file.file_name else ".mp4"
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
@@ -242,60 +241,73 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Filme salvo no Firebase!")
 
 # ======================================================
-# Variável Global para o Flag de Inicialização Única (ANTI-CONFLITO)
+# INICIALIZAÇÃO DE APLICAÇÃO PTB (Global)
 # ======================================================
-is_bot_running = False
+application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+# Handler 1: Processa a Capa/Legenda (metadata)
+application.add_handler(
+    MessageHandler(filters.Caption, handle_photo) 
+)
+
+# Handler 2: Processa o Vídeo
+application.add_handler(
+    MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video)
+)
+
 
 # ======================================================
-# BOT STARTER (Estabilidade FINAL no Render)
+# WEBSERVICE HANDLER (POST)
 # ======================================================
-def start_polling():
-    """Configura e inicia o bot PTB em polling na thread separada."""
-    global is_bot_running
-    
-    # Adiciona a verificação de flag: SÓ RODA SE NÃO ESTIVER RODANDO
-    if is_bot_running:
-        print("AVISO: Tentativa de iniciar o bot mais de uma vez, ignorando.")
-        return
 
-    is_bot_running = True # Seta o flag para True
-
-    # SOLUÇÃO PARA EVENT LOOP (Necessário para Python 3.13): 
+@app_flask.route("/telegram-webhook", methods=["POST"])
+async def telegram_webhook():
+    """Recebe o Update do Telegram e o processa de forma assíncrona."""
     try:
+        if not request.json:
+            return "OK", 200
+
+        update = Update.de_json(request.json, application.bot)
+        
+        # Cria um novo Event Loop (necessário para rodar PTB assíncrono dentro do Flask síncrono)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        
+        # Processa o Update no loop
+        loop.run_until_complete(application.process_update(update))
+
+        return "OK", 200
+
     except Exception as e:
-        print(f"ERRO CRÍTICO ao configurar asyncio: {e}")
-        is_bot_running = False
-        return
-
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    # 🚨 Handler 1: Filtro FINAL (CORRIGIDO): Usa apenas filters.Caption para evitar TypeError.
-    app.add_handler(
-        MessageHandler(filters.Caption, handle_photo) 
-    )
-    
-    # Handler 2: Processa o Vídeo
-    app.add_handler(
-        MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video)
-    )
-
-    print("🤖 Bot Telegram iniciando...")
-    
-    # run_polling é síncrono e BLOQUEIA esta thread.
-    app.run_polling(drop_pending_updates=True, stop_signals=None) 
-    
-    is_bot_running = False 
+        print(f"❌ Erro ao processar webhook: {e}")
+        return "Internal Server Error", 500
 
 
 # ======================================================
-# STARTUP DE THREAD ÚNICA (Ponto de entrada para o Gunicorn)
+# CONFIGURAÇÃO DE WEBSERVICE (Startup)
 # ======================================================
-# Chamamos o polling na thread uma única vez na inicialização do arquivo
-# O Gunicorn (ou o Render) executa este código uma vez ao carregar o módulo.
-threading.Thread(target=start_polling, daemon=True).start()
 
-# IMPORTANTE: A variável 'app_flask' está disponível globalmente para ser usada pelo Gunicorn.
-# Comando de Início (Start Command) no Render deve ser:
-# gunicorn --bind 0.0.0.0:$PORT telegram_bot:app_flask
+def setup_webhook():
+    """Configura o Webhook no Telegram na inicialização."""
+    try:
+        full_webhook_url = f"{WEBHOOK_URL}/telegram-webhook"
+        
+        print(f"🔗 Tentando configurar Webhook para: {full_webhook_url}")
+        
+        # Executa a configuração do Webhook de forma assíncrona (drop_pending_updates=True limpa o polling antigo)
+        async def set_hook():
+            await application.bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
+            print("✅ Webhook configurado com sucesso. Bot está pronto!")
+        
+        # Roda a função assíncrona
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(set_hook())
+
+    except Exception as e:
+        print(f"❌ ERRO CRÍTICO no setup do Webhook: {e}. Verifique o BOT_TOKEN e RENDER_EXTERNAL_URL.")
+
+# Executa o setup do webhook de forma síncrona antes de entregar o controle ao Gunicorn
+print("🤖 Iniciando Bot em modo Webhook...")
+setup_webhook() 
+
+# O Gunicorn usa a variável 'app_flask' para rodar o servidor HTTP.
