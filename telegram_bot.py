@@ -3,7 +3,7 @@ import time
 import tempfile
 import urllib.parse
 import asyncio 
-import json # Adicionado para desserialização manual
+import json
 
 from flask import Flask, request
 from dotenv import load_dotenv
@@ -67,7 +67,7 @@ def home():
 pending_movies = {} 
 
 # ======================================================
-# HELPERS (Inalterados)
+# HELPERS
 # ======================================================
 def build_download_url(blob):
     path = urllib.parse.quote(blob.name, safe="")
@@ -101,7 +101,7 @@ def parse_metadata(text: str):
 
 
 # ======================================================
-# HANDLERS (Mantenha inalterados)
+# HANDLERS
 # ======================================================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_chat(update): return
@@ -173,7 +173,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ======================================================
-# INICIALIZAÇÃO DE APLICAÇÃO PTB (GLOBAL) - Revertida para simplificação
+# INICIALIZAÇÃO DE APLICAÇÃO PTB (GLOBAL)
 # ======================================================
 
 application = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -182,51 +182,33 @@ application.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, h
 
 
 # ======================================================
-# WEBSERVICE HANDLER (POST) - CORREÇÃO MANUAL DE DESSERIALIZAÇÃO
+# WEBSERVICE HANDLER (POST) - CORREÇÃO FINAL (handle_update)
 # ======================================================
 
 @app_flask.route("/telegram-webhook", methods=["POST"])
 def telegram_webhook():
-    """Recebe o Update do Telegram, desserializa manualmente e processa."""
+    """
+    Recebe o Update do Telegram.
+    Usa application.handle_update(update) para Thread-Safety e Inicialização.
+    """
     try:
-        update_data = request.get_data()
+        # 1. Pega o JSON do Telegram
+        update_json = request.get_json(force=True)
         
-        if not update_data:
-            return "OK", 200
-
-        # Desserializa os dados manualmente.
-        # update_dict = json.loads(update_data) # Desnecessário, mas o .get_data() é suficiente
-        
-        # Cria um novo Event Loop e o seta para esta requisição
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        # 🚨 CORREÇÃO CHAVE: Usamos o método handle_update que é recomendado para Webhook PTB 20+.
-        # Ele aceita o JSON do Telegram e cuida da desserialização e inicialização da Application.
-        loop.run_until_complete(
-            application.update_queue.put(update_data)
-        )
-        
-        # Como estamos rodando em Gunicorn, não usamos application.process_update(update_data)
-        # nem application.run_polling/run_webhook. A melhor forma é usar a queue.
-        # No entanto, a queue só é processada pelo Updater/Runner.
-
-        # Como estamos forçando o processamento dentro de um worker Gunicorn, 
-        # a sintaxe mais estável é a anterior, mas vamos tentar a queue com a nova estrutura.
-        # ---
-        # VOLTANDO AO PADRÃO PTB P/ FLASK APÓS MAIS TESTES EM AMBIENTES SEMELHANTES:
-
-        # 1. Desserialização manual (mais seguro)
-        update_json = request.json
         if update_json is None:
             return "OK", 200
 
         # 2. Cria o objeto Update
         update = Update.de_json(update_json, application.bot)
 
-        # 3. Processa no loop
+        # 3. Cria um novo Event Loop e o seta para esta requisição
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        # 4. 🚨 MÉTODO FINAL: handle_update para processar o objeto Update
+        # Ele lida com o contexto de inicialização dentro do worker de forma segura.
         loop.run_until_complete(
-            application.process_update(update)
+            application.handle_update(update)
         )
 
         return "OK", 200
@@ -247,7 +229,6 @@ def setup_webhook():
         print(f"🔗 Tentando configurar Webhook para: {full_webhook_url}")
         
         async def set_hook():
-            # Usa a Application GLOBAL aqui
             await application.bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
             print("✅ Webhook configurado com sucesso. Bot está pronto!")
         
