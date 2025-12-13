@@ -3,7 +3,7 @@ import threading
 import time
 import tempfile
 import urllib.parse
-# 🚨 NOVO IMPORT
+# Import necessário para a solução do erro do Event Loop
 import asyncio 
 
 from flask import Flask
@@ -239,7 +239,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def start_polling():
     """Configura e inicia o bot PTB em polling na thread separada."""
     
-    # 🚨 SOLUÇÃO PARA EVENT LOOP: 
+    # SOLUÇÃO PARA EVENT LOOP:
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -249,6 +249,7 @@ def start_polling():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # 🚨 CORREÇÃO DO TYPERROR APLICADA AQUI: 
     # Handler 1: Filtro Relaxado: Aceita QUALQUER MENSAGEM com Legenda
     app.add_handler(
         MessageHandler(filters.ALL & filters.Caption, handle_photo) 
