@@ -3,6 +3,9 @@ import threading
 import time
 import tempfile
 import urllib.parse
+# 🚨 NOVO IMPORT
+import asyncio 
+
 from flask import Flask
 
 from dotenv import load_dotenv
@@ -28,7 +31,7 @@ FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL")
 FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET")
 ALLOWED_CHAT_ID = os.getenv("TELEGRAM_GROUP_ID") 
 
-# Validação de variáveis de ambiente (Usa a validação mais completa)
+# Validação de variáveis de ambiente
 if not all([BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_STORAGE_BUCKET, ALLOWED_CHAT_ID]):
     raise RuntimeError("Variáveis de ambiente incompletas. Verifique BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_STORAGE_BUCKET e TELEGRAM_GROUP_ID.")
 
@@ -50,7 +53,7 @@ if not firebase_admin._apps:
         raise
 
 bucket = storage.bucket()
-movies_ref = db.reference("movies") # Nó principal do Realtime Database
+movies_ref = db.reference("movies") 
 
 # ======================================================
 # FLASK (Keep-Alive para Render Free)
@@ -79,7 +82,7 @@ def check_chat(update: Update) -> bool:
     """Verifica se a mensagem vem do grupo permitido e imprime DEBUG."""
     chat_id_atual = str(update.effective_chat.id)
     
-    # 🚨 DEBUG: Imprime o ID atual no log do Render
+    # DEBUG: Imprime o ID atual no log do Render
     print(f"DEBUG: Tentativa de chat ID: {chat_id_atual}")
     
     if chat_id_atual == str(ALLOWED_CHAT_ID):
@@ -231,11 +234,19 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Filme salvo no Firebase!")
 
 # ======================================================
-# BOT STARTER (Estabilidade no Render)
+# BOT STARTER (Estabilidade FINAL no Render)
 # ======================================================
 def start_polling():
     """Configura e inicia o bot PTB em polling na thread separada."""
     
+    # 🚨 SOLUÇÃO PARA EVENT LOOP: 
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    except Exception as e:
+        print(f"ERRO CRÍTICO ao configurar asyncio: {e}")
+        return
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # Handler 1: Filtro Relaxado: Aceita QUALQUER MENSAGEM com Legenda
