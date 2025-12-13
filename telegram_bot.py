@@ -148,8 +148,10 @@ def main():
     )
 
     print("🤖 Bot online 24h...")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
+
 
 
 if __name__ == "__main__":
     main()
+
