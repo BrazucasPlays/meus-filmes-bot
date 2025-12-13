@@ -27,7 +27,6 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL")
 FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET")
 ALLOWED_CHAT_ID = os.getenv("TELEGRAM_GROUP_ID") 
-# RENDER_EXTERNAL_URL DEVE ser definido no Render (ex: https://seu-bot.onrender.com)
 WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL") 
 
 if not all([BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_STORAGE_BUCKET, ALLOWED_CHAT_ID, WEBHOOK_URL]):
@@ -59,7 +58,6 @@ app_flask = Flask(__name__)
 
 @app_flask.route("/")
 def home():
-    # Mensagem de saúde para o ping do Render
     return "🤖 Bot online (Webhook mode)", 200
 
 # ======================================================
@@ -68,7 +66,7 @@ def home():
 pending_movies = {} 
 
 # ======================================================
-# HELPERS (Inalterados)
+# HELPERS (Mantenha inalterados)
 # ======================================================
 def build_download_url(blob):
     path = urllib.parse.quote(blob.name, safe="")
@@ -89,9 +87,7 @@ def parse_metadata(text: str):
             if label.lower() in line.lower():
                 return line.split(":", 1)[-1].strip()
         return None
-
     synopsis = text.split("Sinopse:", 1)[-1].strip() if "Sinopse:" in text else None
-    
     return {
         "title": get("Título") or "Sem título",
         "synopsis": synopsis,
@@ -104,58 +100,38 @@ def parse_metadata(text: str):
 
 
 # ======================================================
-# HANDLERS (Lógica inalterada)
+# HANDLERS (Mantenha inalterados)
 # ======================================================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not check_chat(update):
-        return
+    if not check_chat(update): return
     chat_id = update.effective_chat.id
     text = update.message.caption 
-
     photo = update.message.photo[-1] if update.message.photo else None
     document_image = update.message.document if update.message.document and update.message.document.mime_type.startswith('image') else None
-    
-    if not photo and not document_image:
-        return 
-    if "título" not in text.lower():
-        return
+    if not photo and not document_image: return 
+    if "título" not in text.lower(): return
     poster_file_id = photo.file_id if photo else (document_image.file_id if document_image else None)
-    
     if not poster_file_id:
         await update.message.reply_text("⚠️ Falha ao obter o ID da imagem. Tente enviar a imagem diretamente.")
         return
-
     metadata = parse_metadata(text)
-
-    pending_movies[chat_id] = {
-        "poster_file_id": poster_file_id,
-        "metadata": metadata, 
-        "created_at": time.time(),
-    }
+    pending_movies[chat_id] = {"poster_file_id": poster_file_id, "metadata": metadata, "created_at": time.time()}
     await update.message.reply_text("✅ Capa e Metadados recebidos. Agora envie o **VÍDEO** do filme.")
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not check_chat(update):
-        return
+    if not check_chat(update): return
     chat_id = update.effective_chat.id
     pending = pending_movies.get(chat_id)
-
     if not pending or "metadata" not in pending:
-        await update.message.reply_text(
-            "⚠️ Ordem incorreta. Envie: **Capa + Texto** primeiro → **Vídeo**."
-        )
+        await update.message.reply_text("⚠️ Ordem incorreta. Envie: **Capa + Texto** primeiro → **Vídeo**.")
         return
-
     file = update.message.video or update.message.document 
-    
     if not file or (update.message.document and not update.message.document.mime_type.startswith('video')):
         await update.message.reply_text("⚠️ Mensagem não contém um arquivo de vídeo válido.")
         return
-        
     file_id = file.file_id
     await update.message.reply_text("📥 Salvando no Firebase... (Isto pode levar tempo)")
-
     movie_ref = movies_ref.push()
     movie_id = movie_ref.key
 
@@ -179,7 +155,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         video_file = await context.bot.get_file(file_id)
         ext = "." + file.file_name.split(".")[-1] if file.file_name and "." in file.file_name else ".mp4"
-
         with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
             await video_file.download_to_drive(tmp.name)
             video_blob = bucket.blob(f"movies/{movie_id}/video{ext}") 
@@ -193,52 +168,49 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 2. SALVAR NO REALTIME DATABASE
     data = pending["metadata"]
-    movie_ref.set(
-        {
-            **data,
-            "posterUrl": poster_url, 
-            "videoUrl": video_url, 
-            "createdAt": int(time.time() * 1000),
-        }
-    )
+    movie_ref.set({**data, "posterUrl": poster_url, "videoUrl": video_url, "createdAt": int(time.time() * 1000)})
     pending_movies.pop(chat_id, None)
     await update.message.reply_text("✅ Filme salvo no Firebase!")
 # ======================================================
 
 
 # ======================================================
-# INICIALIZAÇÃO DE APLICAÇÃO PTB (Global)
+# FUNÇÃO DE CRIAÇÃO/CONFIGURAÇÃO DA APLICAÇÃO PTB
 # ======================================================
-application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-application.add_handler(MessageHandler(filters.Caption, handle_photo)) 
-application.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
+def get_application():
+    """Cria e configura a Application e seus handlers."""
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    app.add_handler(MessageHandler(filters.Caption, handle_photo)) 
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
+    
+    return app
 
 
 # ======================================================
-# WEBSERVICE HANDLER (POST) - FINAL CORRIGIDO E ESTÁVEL
+# WEBSERVICE HANDLER (POST) - FINAL CORRIGIDO
 # ======================================================
 
 @app_flask.route("/telegram-webhook", methods=["POST"])
 def telegram_webhook():
-    """
-    Recebe o Update do Telegram e o processa de forma assíncrona (internamente).
-    Esta função é SÍNCRONA para Flask/Gunicorn.
-    """
+    """Recebe o Update e o processa."""
     try:
-        # Pega os dados brutos da requisição POST
         update_data = request.get_data()
         
         if not update_data:
             return "OK", 200
 
-        # Cria um novo Event Loop e o seta para esta requisição (necessário para PTB async)
+        # 🚨 GARANTINDO O CONTEXTO: Inicializamos a aplicação DENTRO do worker.
+        current_application = get_application()
+        
+        # Cria um novo Event Loop e o seta para esta requisição
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        # O process_update lida com a desserialização e garante a ligação à Application
+        # Processa o update
         loop.run_until_complete(
-            application.process_update(update_data)
+            current_application.process_update(update_data)
         )
 
         return "OK", 200
@@ -256,12 +228,13 @@ def setup_webhook():
     """Configura o Webhook no Telegram na inicialização."""
     try:
         full_webhook_url = f"{WEBHOOK_URL}/telegram-webhook"
-        
         print(f"🔗 Tentando configurar Webhook para: {full_webhook_url}")
         
+        # Criamos uma instância SÓ PARA O SETUP do webhook.
+        setup_app = get_application()
+
         async def set_hook():
-            # drop_pending_updates=True limpa o polling antigo (Anti-Conflict)
-            await application.bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
+            await setup_app.bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
             print("✅ Webhook configurado com sucesso. Bot está pronto!")
         
         loop = asyncio.new_event_loop()
@@ -272,6 +245,4 @@ def setup_webhook():
 
 # Executa o setup do webhook na inicialização do módulo (Gunicorn)
 print("🤖 Iniciando Bot em modo Webhook...")
-setup_webhook() 
-
-# A variável 'app_flask' é usada pelo Gunicorn.
+setup_webhook()
