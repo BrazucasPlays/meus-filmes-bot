@@ -1,19 +1,14 @@
 import os
-# Removido asyncio, pois run_polling é síncrono e gerencia o loop
-import threading 
+import threading
 import time
 import tempfile
 import urllib.parse
-# Importado o módulo 'asyncio' para usar 'asyncio.run' se necessário, 
-# mas vamos usar run_polling que simplifica a execução.
-
 from flask import Flask
 
 from dotenv import load_dotenv
 
 from telegram import Update
 from telegram.ext import (
-    Application,
     ApplicationBuilder,
     MessageHandler,
     ContextTypes,
@@ -24,129 +19,128 @@ import firebase_admin
 from firebase_admin import credentials, db, storage
 
 # ======================================================
-# ENV
+# ENV & INIT
 # ======================================================
 load_dotenv()
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL")
 FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET")
-ALLOWED_CHAT_ID = os.getenv("TELEGRAM_GROUP_ID")
+ALLOWED_CHAT_ID = os.getenv("TELEGRAM_GROUP_ID") # ID do grupo onde o bot deve monitorar
 
-if not BOT_TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN não definido")
+# Validação de variáveis de ambiente
+if not all([BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_STORAGE_BUCKET]):
+    raise RuntimeError("Variáveis de ambiente incompletas.")
 
-if not FIREBASE_DB_URL:
-    raise RuntimeError("FIREBASE_DB_URL não definido")
-
-if not FIREBASE_STORAGE_BUCKET:
-    raise RuntimeError("FIREBASE_STORAGE_BUCKET não definido")
-
-# ======================================================
-# FIREBASE INIT (APENAS UMA VEZ)
-# ======================================================
+# Inicialização ÚNICA do Firebase
 if not firebase_admin._apps:
-    # ⚠️ Certifique-se que 'firebase-key.json' está na raiz do projeto
-    cred = credentials.Certificate("firebase-key.json") 
-    firebase_admin.initialize_app(
-        cred,
-        {
-            "databaseURL": FIREBASE_DB_URL,
-            "storageBucket": FIREBASE_STORAGE_BUCKET,
-        },
-    )
+    try:
+        # Certifique-se que 'firebase-key.json' está na raiz do projeto
+        cred = credentials.Certificate("firebase-key.json") 
+        firebase_admin.initialize_app(
+            cred,
+            {
+                "databaseURL": FIREBASE_DB_URL,
+                "storageBucket": FIREBASE_STORAGE_BUCKET,
+            },
+        )
+        print("✅ Firebase inicializado com sucesso.")
+    except Exception as e:
+        print(f"❌ Erro ao inicializar Firebase: {e}")
+        raise
 
 bucket = storage.bucket()
-movies_ref = db.reference("movies")
+movies_ref = db.reference("movies") # Nó principal do Realtime Database
 
 # ======================================================
-# FLASK (OBRIGATÓRIO PARA RENDER FREE)
+# FLASK (Keep-Alive para Render Free)
 # ======================================================
 app_flask = Flask(__name__)
 
 @app_flask.route("/")
 def home():
-    # Render precisa de um endpoint HTTP para saber que o serviço está ativo
     return "🤖 Bot online 24h", 200
 
 # ======================================================
 # MEMÓRIA TEMPORÁRIA
 # ======================================================
-pending_movies = {}
+# Armazena o estado do filme (capa + metadata) por chat
+pending_movies = {} 
 
 # ======================================================
 # HELPERS
 # ======================================================
 def build_download_url(blob):
+    """Gera uma URL de acesso público para o arquivo no Firebase Storage."""
     path = urllib.parse.quote(blob.name, safe="")
-    # Cria uma URL pública de download direto para o Firebase Storage
     return f"https://firebasestorage.googleapis.com/v0/b/{bucket.name}/o/{path}?alt=media"
 
 
 def check_chat(update: Update) -> bool:
+    """Verifica se a mensagem vem do grupo permitido."""
     if not ALLOWED_CHAT_ID:
         return True
     return str(update.effective_chat.id) == str(ALLOWED_CHAT_ID)
 
 
 def parse_metadata(text: str):
+    """Extrai campos específicos do texto formatado do filme."""
     def get(label):
         for line in text.splitlines():
+            # Procura por linhas que contenham o rótulo (ex: "Título:")
             if label.lower() in line.lower():
+                # Retorna o texto após os dois pontos
                 return line.split(":", 1)[-1].strip()
         return None
 
+    # Tenta extrair a sinopse usando o separador "Sinopse:"
+    synopsis = text.split("Sinopse:", 1)[-1].strip() if "Sinopse:" in text else None
+    
     return {
+        # Campos principais (necessários para o App Flutter)
         "title": get("Título") or "Sem título",
+        "synopsis": synopsis,
+        
+        # Campos extras
         "director": get("Diretor"),
         "audio": get("Áudio"),
         "year": get("Lançamento"),
         "genres": get("Gêneros"),
-        # Extrai a sinopse após a tag "Sinopse:"
-        "synopsis": text.split("Sinopse:", 1)[-1].strip()
-        if "Sinopse:" in text
-        else None,
     }
 
 # ======================================================
-# HANDLERS (LOGIC)
+# HANDLERS (LÓGICA AUTOMÁTICA)
 # ======================================================
+
+# Handler 1: Processa a foto e a legenda (metadata)
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_chat(update):
         return
 
     chat_id = update.effective_chat.id
     photo = update.message.photo[-1] # Pega a foto de maior resolução
+    text = update.message.caption # <--- PEGA A LEGENDA AQUI
+
+    # 🚨 REGRA DE NEGÓCIO: A legenda deve existir e conter "Título" para ser válida.
+    if not text or "título" not in text.lower():
+        await update.message.reply_text(
+            "⚠️ A Capa deve ser enviada **com a legenda** contendo 'Título:' e 'Sinopse:'."
+        )
+        return
+
+    # Processa e armazena os metadados imediatamente
+    metadata = parse_metadata(text)
 
     pending_movies[chat_id] = {
         "poster_file_id": photo.file_id,
+        "metadata": metadata, 
         "created_at": time.time(),
     }
 
-    await update.message.reply_text("✅ Capa recebida. Agora envie o texto do filme.")
+    await update.message.reply_text("✅ Capa e Metadados recebidos. Agora envie o **VÍDEO** do filme.")
 
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not check_chat(update):
-        return
-
-    chat_id = update.effective_chat.id
-    text = update.message.text
-
-    # Verifica se o texto é uma metadata de filme válida
-    if "título" not in text.lower():
-        return
-
-    pending = pending_movies.get(chat_id)
-    if not pending:
-        await update.message.reply_text("⚠️ Por favor, envie a CAPA primeiro.")
-        return
-
-    pending["metadata"] = parse_metadata(text)
-
-    await update.message.reply_text("📝 Texto recebido. Agora envie o vídeo.")
-
-
+# Handler 2: Processa o vídeo, faz uploads e salva no DB
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_chat(update):
         return
@@ -154,100 +148,99 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     pending = pending_movies.get(chat_id)
 
+    # Verifica se a capa e a metadata já foram enviadas
     if not pending or "metadata" not in pending:
         await update.message.reply_text(
-            "⚠️ Ordem incorreta. Envie: capa → texto → vídeo."
+            "⚠️ Ordem incorreta. Envie: **Capa + Texto** primeiro → **Vídeo**."
         )
         return
 
-    file = update.message.video or update.message.document
+    # O vídeo pode vir como 'video' ou 'document' (arquivo de vídeo)
+    file = update.message.video or update.message.document 
     file_id = file.file_id
 
     await update.message.reply_text("📥 Salvando no Firebase... (Isto pode levar tempo)")
 
-    # 1. ID do filme no Realtime Database
+    # 1. ID do filme no Realtime Database (Gera a chave única)
     movie_ref = movies_ref.push()
     movie_id = movie_ref.key
 
-    # 2. POSTER (Salva no Firebase Storage)
+    # --- UPLOAD PARA FIREBASE STORAGE ---
+
+    # POSTER
+    poster_url = ""
     try:
         poster_file = await context.bot.get_file(pending["poster_file_id"])
         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
             await poster_file.download_to_drive(tmp.name)
-            # Define o caminho no Storage
             poster_blob = bucket.blob(f"movies/{movie_id}/poster.jpg") 
             poster_blob.upload_from_filename(tmp.name)
+            poster_url = build_download_url(poster_blob)
     except Exception as e:
         print(f"Erro ao salvar poster: {e}")
-        await update.message.reply_text("❌ Falha ao salvar a capa. Tente novamente.")
+        await update.message.reply_text("❌ Falha crítica ao salvar a capa.")
         return
 
-    # 3. VIDEO (Salva no Firebase Storage)
+    # VIDEO
+    video_url = ""
     try:
         video_file = await context.bot.get_file(file_id)
-        ext = ".mp4"
-        if file.file_name and "." in file.file_name:
-            ext = "." + file.file_name.split(".")[-1]
+        # Tenta preservar a extensão original do arquivo
+        ext = "." + file.file_name.split(".")[-1] if file.file_name and "." in file.file_name else ".mp4"
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
             await video_file.download_to_drive(tmp.name)
-            # Define o caminho no Storage
             video_blob = bucket.blob(f"movies/{movie_id}/video{ext}") 
             video_blob.upload_from_filename(tmp.name)
+            video_url = build_download_url(video_blob)
     except Exception as e:
         print(f"Erro ao salvar vídeo: {e}")
-        await update.message.reply_text("❌ Falha ao salvar o vídeo. Tente novamente.")
+        await update.message.reply_text("❌ Falha crítica ao salvar o vídeo.")
         return
 
-
-    # 4. DATABASE (Salva no Realtime Database)
+    # 2. SALVAR NO REALTIME DATABASE
     data = pending["metadata"]
     movie_ref.set(
         {
             **data,
-            # URL de download público da capa (posterUrl)
-            "posterUrl": build_download_url(poster_blob), 
-            # URL de download público do vídeo (videoUrl)
-            "videoUrl": build_download_url(video_blob), 
+            "posterUrl": poster_url, 
+            "videoUrl": video_url, 
             "createdAt": int(time.time() * 1000),
         }
     )
 
+    # Limpa a memória temporária
     pending_movies.pop(chat_id, None)
 
     await update.message.reply_text("✅ Filme salvo no Firebase!")
 
 # ======================================================
-# BOT STARTER (CORRIGIDO PARA RENDER)
+# BOT STARTER (Corrigido para a estabilidade no Render)
 # ======================================================
 def start_polling():
-    """Configura e inicia o bot usando run_polling dentro da thread."""
+    """Configura e inicia o bot PTB em polling."""
     
-    # 1. Constrói o Application
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # 2. Adiciona os Handlers
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    # Handlers para o fluxo de 2 etapas
+    app.add_handler(MessageHandler(filters.PHOTO & filters.CAPTION, handle_photo))
     app.add_handler(
         MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video)
     )
 
     print("🤖 Bot Telegram iniciando...")
     
-    # 3. run_polling é síncrono e BLOQUEIA a thread, mas não o Flask, 
-    # pois está em uma thread separada. Isso mantém o bot vivo.
+    # run_polling é síncrono e BLOQUEIA esta thread, mantendo o bot vivo.
     app.run_polling(drop_pending_updates=True, stop_signals=None) 
 
 # ======================================================
 # MAIN
 # ======================================================
 if __name__ == "__main__":
-    # Inicia o bot em uma thread separada (target=start_polling) 
-    # para não bloquear a thread principal, que deve ser usada pelo Flask.
+    # 1. Inicia o Bot em uma thread separada para não bloquear a thread principal
+    # que será usada pelo Flask.
     threading.Thread(target=start_polling, daemon=True).start()
     
-    # Inicia o Flask na thread principal (bloqueia aqui).
+    # 2. Inicia o Flask na thread principal para satisfazer o Render.
     port = int(os.environ.get("PORT", 10000))
-    # Note: O Render espera que você use '0.0.0.0' e a porta $PORT
     app_flask.run(host="0.0.0.0", port=port)
