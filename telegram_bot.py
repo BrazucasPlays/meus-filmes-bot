@@ -27,7 +27,7 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL")
 FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET")
 ALLOWED_CHAT_ID = os.getenv("TELEGRAM_GROUP_ID") 
-# RENDER_EXTERNAL_URL deve ser definido nas variáveis de ambiente do Render (ex: https://seu-bot.onrender.com)
+# RENDER_EXTERNAL_URL deve ser definido nas variáveis de ambiente do Render
 WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL") 
 
 if not all([BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_STORAGE_BUCKET, ALLOWED_CHAT_ID, WEBHOOK_URL]):
@@ -36,6 +36,7 @@ if not all([BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_STORAGE_BUCKET, ALLOWED_CHAT_ID
 # Inicialização ÚNICA do Firebase
 if not firebase_admin._apps:
     try:
+        # Certifique-se que 'firebase-key.json' está na raiz do projeto
         cred = credentials.Certificate("firebase-key.json") 
         firebase_admin.initialize_app(
             cred,
@@ -69,7 +70,6 @@ pending_movies = {}
 
 # ======================================================
 # HELPERS
-# ... (Mantenha build_download_url, check_chat e parse_metadata inalterados)
 # ======================================================
 def build_download_url(blob):
     """Gera uma URL de acesso público para o arquivo no Firebase Storage."""
@@ -80,8 +80,6 @@ def build_download_url(blob):
 def check_chat(update: Update) -> bool:
     """Verifica se a mensagem vem do grupo permitido e imprime DEBUG."""
     chat_id_atual = str(update.effective_chat.id)
-    
-    # DEBUG: Imprime o ID atual no log do Render
     print(f"DEBUG: Tentativa de chat ID: {chat_id_atual}")
     
     if chat_id_atual == str(ALLOWED_CHAT_ID):
@@ -96,11 +94,9 @@ def parse_metadata(text: str):
     def get(label):
         for line in text.splitlines():
             if label.lower() in line.lower():
-                # Retorna o texto após os dois pontos
                 return line.split(":", 1)[-1].strip()
         return None
 
-    # Tenta extrair a sinopse usando o separador "Sinopse:"
     synopsis = text.split("Sinopse:", 1)[-1].strip() if "Sinopse:" in text else None
     
     return {
@@ -116,7 +112,6 @@ def parse_metadata(text: str):
 
 # ======================================================
 # HANDLERS (LÓGICA AUTOMÁTICA)
-# ... (Mantenha handle_photo e handle_video inalterados)
 # ======================================================
 
 # Handler 1: Processa a imagem (foto ou documento) e a legenda (metadata)
@@ -127,27 +122,21 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = update.message.caption 
 
-    # Tenta obter a foto de maior resolução ou o documento se for imagem
     photo = update.message.photo[-1] if update.message.photo else None
     document_image = update.message.document if update.message.document and update.message.document.mime_type.startswith('image') else None
     
-    # Se não houver nenhum tipo de imagem, retorna. O filtro já garante a legenda.
     if not photo and not document_image:
         return 
 
-    # 🚨 REGRA DE NEGÓCIO: A legenda deve conter "Título" para ser metadata válida.
     if "título" not in text.lower():
-        # Ignora, pois a mensagem não é um filme
         return
 
-    # Tenta obter o file_id da imagem
     poster_file_id = photo.file_id if photo else (document_image.file_id if document_image else None)
     
     if not poster_file_id:
         await update.message.reply_text("⚠️ Falha ao obter o ID da imagem. Tente enviar a imagem diretamente.")
         return
 
-    # Processa e armazena os metadados
     metadata = parse_metadata(text)
 
     pending_movies[chat_id] = {
@@ -167,7 +156,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     pending = pending_movies.get(chat_id)
 
-    # Verifica se a metadata já foi enviada (Etapa 1)
     if not pending or "metadata" not in pending:
         await update.message.reply_text(
             "⚠️ Ordem incorreta. Envie: **Capa + Texto** primeiro → **Vídeo**."
@@ -176,7 +164,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     file = update.message.video or update.message.document 
     
-    # Verifica se realmente é um arquivo de vídeo
     if not file or (update.message.document and not update.message.document.mime_type.startswith('video')):
         await update.message.reply_text("⚠️ Mensagem não contém um arquivo de vídeo válido.")
         return
@@ -257,22 +244,25 @@ application.add_handler(
 
 
 # ======================================================
-# WEBSERVICE HANDLER (POST)
+# WEBSERVICE HANDLER (POST) - CORRIGIDO
 # ======================================================
 
 @app_flask.route("/telegram-webhook", methods=["POST"])
-async def telegram_webhook():
-    """Recebe o Update do Telegram e o processa de forma assíncrona."""
+def telegram_webhook():
+    """
+    Recebe o Update do Telegram e o processa de forma assíncrona (internamente).
+    Esta função é SÍNCRONA para compatibilidade com Flask/Gunicorn.
+    """
     try:
         if not request.json:
             return "OK", 200
 
-        update = Update.de_json(request.json, application.bot)
-        
-        # Cria um novo Event Loop (necessário para rodar PTB assíncrono dentro do Flask síncrono)
+        # Cria um novo Event Loop e o seta para esta requisição
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
+        update = Update.de_json(request.json, application.bot)
+
         # Processa o Update no loop
         loop.run_until_complete(application.process_update(update))
 
@@ -294,8 +284,9 @@ def setup_webhook():
         
         print(f"🔗 Tentando configurar Webhook para: {full_webhook_url}")
         
-        # Executa a configuração do Webhook de forma assíncrona (drop_pending_updates=True limpa o polling antigo)
+        # Executa a configuração do Webhook de forma assíncrona
         async def set_hook():
+            # drop_pending_updates=True limpa o polling antigo, resolvendo o Conflict
             await application.bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
             print("✅ Webhook configurado com sucesso. Bot está pronto!")
         
@@ -306,7 +297,7 @@ def setup_webhook():
     except Exception as e:
         print(f"❌ ERRO CRÍTICO no setup do Webhook: {e}. Verifique o BOT_TOKEN e RENDER_EXTERNAL_URL.")
 
-# Executa o setup do webhook de forma síncrona antes de entregar o controle ao Gunicorn
+# Executa o setup do webhook na inicialização do módulo
 print("🤖 Iniciando Bot em modo Webhook...")
 setup_webhook() 
 
