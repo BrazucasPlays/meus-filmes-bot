@@ -256,8 +256,10 @@ def start_polling():
     )
     
     # Handler 2: Processa o Vídeo
+    # Handler 1: Filtro Relaxado: Aceita QUALQUER MENSAGEM com Legenda
+    # Corrigido o TypeError removendo o filters.ALL, que estava causando conflito de tipos.
     app.add_handler(
-        MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video)
+        MessageHandler(filters.Caption, handle_photo) 
     )
 
     print("🤖 Bot Telegram iniciando...")
@@ -275,3 +277,4 @@ if __name__ == "__main__":
     # 2. Inicia o Flask na thread principal para satisfazer o Render.
     port = int(os.environ.get("PORT", 10000))
     app_flask.run(host="0.0.0.0", port=port)
+
