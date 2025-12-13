@@ -3,8 +3,7 @@ import threading
 import time
 import tempfile
 import urllib.parse
-# Import necessário para a solução do erro do Event Loop
-import asyncio 
+import asyncio # Import necessário para a solução do erro do Event Loop
 
 from flask import Flask
 
@@ -130,6 +129,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document_image = update.message.document if update.message.document and update.message.document.mime_type.startswith('image') else None
     
     # Se não houver nenhum tipo de imagem (e sim apenas texto na legenda, por ex.), o bot para aqui
+    # Este filtro só é acionado se houver uma legenda, então a foto deve ser verificada aqui.
     if not photo and not document_image:
         return 
 
@@ -173,6 +173,12 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     file = update.message.video or update.message.document 
+    
+    # Verifica se realmente é um arquivo de vídeo
+    if not file or (update.message.document and not update.message.document.mime_type.startswith('video')):
+        await update.message.reply_text("⚠️ Mensagem não contém um arquivo de vídeo válido.")
+        return
+        
     file_id = file.file_id
 
     await update.message.reply_text("📥 Salvando no Firebase... (Isto pode levar tempo)")
@@ -195,6 +201,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"❌ Erro ao salvar poster no Storage: {e}")
         await update.message.reply_text("❌ Falha crítica ao salvar a capa.")
+        # Limpa o filme pendente após falha crítica
         pending_movies.pop(chat_id, None) 
         return
 
@@ -213,6 +220,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"❌ Erro ao salvar vídeo no Storage: {e}")
         await update.message.reply_text("❌ Falha crítica ao salvar o vídeo.")
+        # Limpa o filme pendente após falha crítica
         pending_movies.pop(chat_id, None)
         return
 
@@ -234,47 +242,61 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Filme salvo no Firebase!")
 
 # ======================================================
+# Variável Global para o Flag de Inicialização Única (ANTI-CONFLITO)
+# ======================================================
+is_bot_running = False
+
+# ======================================================
 # BOT STARTER (Estabilidade FINAL no Render)
 # ======================================================
 def start_polling():
     """Configura e inicia o bot PTB em polling na thread separada."""
+    global is_bot_running
     
-    # SOLUÇÃO PARA EVENT LOOP:
+    # Adiciona a verificação de flag: SÓ RODA SE NÃO ESTIVER RODANDO
+    if is_bot_running:
+        print("AVISO: Tentativa de iniciar o bot mais de uma vez, ignorando.")
+        return
+
+    is_bot_running = True # Seta o flag para True
+
+    # SOLUÇÃO PARA EVENT LOOP (Necessário para Python 3.13): 
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
     except Exception as e:
         print(f"ERRO CRÍTICO ao configurar asyncio: {e}")
+        is_bot_running = False # Resetar o flag em caso de falha inicial
         return
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # 🚨 CORREÇÃO DO TYPERROR APLICADA AQUI: 
-    # Handler 1: Filtro Relaxado: Aceita QUALQUER MENSAGEM com Legenda
+    # 🚨 Handler 1: Filtro FINAL (CORRIGIDO): Usa apenas filters.Caption para evitar TypeError.
     app.add_handler(
-        MessageHandler(filters.ALL & filters.Caption, handle_photo) 
+        MessageHandler(filters.Caption, handle_photo) 
     )
     
     # Handler 2: Processa o Vídeo
-    # Handler 1: Filtro Relaxado: Aceita QUALQUER MENSAGEM com Legenda
-    # Corrigido o TypeError removendo o filters.ALL, que estava causando conflito de tipos.
     app.add_handler(
-        MessageHandler(filters.Caption, handle_photo) 
+        MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video)
     )
 
     print("🤖 Bot Telegram iniciando...")
     
     # run_polling é síncrono e BLOQUEIA esta thread.
     app.run_polling(drop_pending_updates=True, stop_signals=None) 
+    
+    # Se o run_polling sair (o que não deve acontecer no Render), resetamos o flag:
+    is_bot_running = False 
+
 
 # ======================================================
 # MAIN
 # ======================================================
 if __name__ == "__main__":
-    # 1. Inicia o Bot em uma thread separada
+    # 1. Inicia o Bot em uma thread separada (com a verificação de flag)
     threading.Thread(target=start_polling, daemon=True).start()
     
     # 2. Inicia o Flask na thread principal para satisfazer o Render.
     port = int(os.environ.get("PORT", 10000))
     app_flask.run(host="0.0.0.0", port=port)
-
