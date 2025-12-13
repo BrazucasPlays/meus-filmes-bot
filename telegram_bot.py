@@ -4,7 +4,7 @@ import tempfile
 import urllib.parse
 import asyncio 
 
-from flask import Flask, request # Adicionado 'request'
+from flask import Flask, request
 from dotenv import load_dotenv
 
 from telegram import Update
@@ -27,7 +27,7 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL")
 FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET")
 ALLOWED_CHAT_ID = os.getenv("TELEGRAM_GROUP_ID") 
-# RENDER_EXTERNAL_URL deve ser definido nas variáveis de ambiente do Render
+# RENDER_EXTERNAL_URL DEVE ser definido no Render (ex: https://seu-bot.onrender.com)
 WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL") 
 
 if not all([BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_STORAGE_BUCKET, ALLOWED_CHAT_ID, WEBHOOK_URL]):
@@ -36,7 +36,6 @@ if not all([BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_STORAGE_BUCKET, ALLOWED_CHAT_ID
 # Inicialização ÚNICA do Firebase
 if not firebase_admin._apps:
     try:
-        # Certifique-se que 'firebase-key.json' está na raiz do projeto
         cred = credentials.Certificate("firebase-key.json") 
         firebase_admin.initialize_app(
             cred,
@@ -69,28 +68,22 @@ def home():
 pending_movies = {} 
 
 # ======================================================
-# HELPERS
+# HELPERS (Inalterados)
 # ======================================================
 def build_download_url(blob):
-    """Gera uma URL de acesso público para o arquivo no Firebase Storage."""
     path = urllib.parse.quote(blob.name, safe="")
     return f"https://firebasestorage.googleapis.com/v0/b/{bucket.name}/o/{path}?alt=media"
 
-
 def check_chat(update: Update) -> bool:
-    """Verifica se a mensagem vem do grupo permitido e imprime DEBUG."""
     chat_id_atual = str(update.effective_chat.id)
     print(f"DEBUG: Tentativa de chat ID: {chat_id_atual}")
-    
     if chat_id_atual == str(ALLOWED_CHAT_ID):
         return True
     else:
         print(f"AVISO: Chat ID {chat_id_atual} BLOQUEADO. Esperado: {ALLOWED_CHAT_ID}")
         return False
 
-
 def parse_metadata(text: str):
-    """Extrai campos específicos do texto formatado do filme."""
     def get(label):
         for line in text.splitlines():
             if label.lower() in line.lower():
@@ -111,14 +104,11 @@ def parse_metadata(text: str):
 
 
 # ======================================================
-# HANDLERS (LÓGICA AUTOMÁTICA)
+# HANDLERS (Lógica inalterada)
 # ======================================================
-
-# Handler 1: Processa a imagem (foto ou documento) e a legenda (metadata)
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_chat(update):
         return
-
     chat_id = update.effective_chat.id
     text = update.message.caption 
 
@@ -127,10 +117,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not photo and not document_image:
         return 
-
     if "título" not in text.lower():
         return
-
     poster_file_id = photo.file_id if photo else (document_image.file_id if document_image else None)
     
     if not poster_file_id:
@@ -144,15 +132,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "metadata": metadata, 
         "created_at": time.time(),
     }
-
     await update.message.reply_text("✅ Capa e Metadados recebidos. Agora envie o **VÍDEO** do filme.")
 
 
-# Handler 2: Processa o vídeo, faz uploads e salva no DB
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_chat(update):
         return
-
     chat_id = update.effective_chat.id
     pending = pending_movies.get(chat_id)
 
@@ -169,16 +154,12 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     file_id = file.file_id
-
     await update.message.reply_text("📥 Salvando no Firebase... (Isto pode levar tempo)")
 
-    # 1. ID do filme no Realtime Database
     movie_ref = movies_ref.push()
     movie_id = movie_ref.key
 
-    # --- UPLOAD PARA FIREBASE STORAGE ---
-
-    # POSTER
+    # --- UPLOAD POSTER ---
     poster_url = ""
     try:
         poster_file = await context.bot.get_file(pending["poster_file_id"])
@@ -193,7 +174,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pending_movies.pop(chat_id, None) 
         return
 
-    # VIDEO
+    # --- UPLOAD VIDEO ---
     video_url = ""
     try:
         video_file = await context.bot.get_file(file_id)
@@ -210,7 +191,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pending_movies.pop(chat_id, None)
         return
 
-
     # 2. SALVAR NO REALTIME DATABASE
     data = pending["metadata"]
     movie_ref.set(
@@ -221,50 +201,45 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "createdAt": int(time.time() * 1000),
         }
     )
-
-    # Limpa a memória temporária
     pending_movies.pop(chat_id, None)
-
     await update.message.reply_text("✅ Filme salvo no Firebase!")
+# ======================================================
+
 
 # ======================================================
 # INICIALIZAÇÃO DE APLICAÇÃO PTB (Global)
 # ======================================================
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# Handler 1: Processa a Capa/Legenda (metadata)
-application.add_handler(
-    MessageHandler(filters.Caption, handle_photo) 
-)
-
-# Handler 2: Processa o Vídeo
-application.add_handler(
-    MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video)
-)
+application.add_handler(MessageHandler(filters.Caption, handle_photo)) 
+application.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
 
 
 # ======================================================
-# WEBSERVICE HANDLER (POST) - CORRIGIDO
+# WEBSERVICE HANDLER (POST) - FINAL CORRIGIDO E ESTÁVEL
 # ======================================================
 
 @app_flask.route("/telegram-webhook", methods=["POST"])
 def telegram_webhook():
     """
     Recebe o Update do Telegram e o processa de forma assíncrona (internamente).
-    Esta função é SÍNCRONA para compatibilidade com Flask/Gunicorn.
+    Esta função é SÍNCRONA para Flask/Gunicorn.
     """
     try:
-        if not request.json:
+        # Pega os dados brutos da requisição POST
+        update_data = request.get_data()
+        
+        if not update_data:
             return "OK", 200
 
-        # Cria um novo Event Loop e o seta para esta requisição
+        # Cria um novo Event Loop e o seta para esta requisição (necessário para PTB async)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        update = Update.de_json(request.json, application.bot)
-
-        # Processa o Update no loop
-        loop.run_until_complete(application.process_update(update))
+        # O process_update lida com a desserialização e garante a ligação à Application
+        loop.run_until_complete(
+            application.process_update(update_data)
+        )
 
         return "OK", 200
 
@@ -284,21 +259,19 @@ def setup_webhook():
         
         print(f"🔗 Tentando configurar Webhook para: {full_webhook_url}")
         
-        # Executa a configuração do Webhook de forma assíncrona
         async def set_hook():
-            # drop_pending_updates=True limpa o polling antigo, resolvendo o Conflict
+            # drop_pending_updates=True limpa o polling antigo (Anti-Conflict)
             await application.bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
             print("✅ Webhook configurado com sucesso. Bot está pronto!")
         
-        # Roda a função assíncrona
         loop = asyncio.new_event_loop()
         loop.run_until_complete(set_hook())
 
     except Exception as e:
         print(f"❌ ERRO CRÍTICO no setup do Webhook: {e}. Verifique o BOT_TOKEN e RENDER_EXTERNAL_URL.")
 
-# Executa o setup do webhook na inicialização do módulo
+# Executa o setup do webhook na inicialização do módulo (Gunicorn)
 print("🤖 Iniciando Bot em modo Webhook...")
 setup_webhook() 
 
-# O Gunicorn usa a variável 'app_flask' para rodar o servidor HTTP.
+# A variável 'app_flask' é usada pelo Gunicorn.
