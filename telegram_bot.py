@@ -28,7 +28,7 @@ FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL")
 FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET")
 ALLOWED_CHAT_ID = os.getenv("TELEGRAM_GROUP_ID") 
 
-# Validação de variáveis de ambiente
+# Validação de variáveis de ambiente (Usa a validação mais completa)
 if not all([BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_STORAGE_BUCKET, ALLOWED_CHAT_ID]):
     raise RuntimeError("Variáveis de ambiente incompletas. Verifique BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_STORAGE_BUCKET e TELEGRAM_GROUP_ID.")
 
@@ -50,7 +50,7 @@ if not firebase_admin._apps:
         raise
 
 bucket = storage.bucket()
-movies_ref = db.reference("movies") 
+movies_ref = db.reference("movies") # Nó principal do Realtime Database
 
 # ======================================================
 # FLASK (Keep-Alive para Render Free)
@@ -64,7 +64,6 @@ def home():
 # ======================================================
 # MEMÓRIA TEMPORÁRIA
 # ======================================================
-# Armazena o estado do filme (capa + metadata) por chat
 pending_movies = {} 
 
 # ======================================================
@@ -127,7 +126,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1] if update.message.photo else None
     document_image = update.message.document if update.message.document and update.message.document.mime_type.startswith('image') else None
     
-    # Se não houver nenhum tipo de imagem, o bot para aqui
+    # Se não houver nenhum tipo de imagem (e sim apenas texto na legenda, por ex.), o bot para aqui
     if not photo and not document_image:
         return 
 
@@ -142,7 +141,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not poster_file_id:
         await update.message.reply_text("⚠️ Falha ao obter o ID da imagem. Tente enviar a imagem diretamente.")
         return
-
 
     # Processa e armazena os metadados
     metadata = parse_metadata(text)
@@ -194,7 +192,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"❌ Erro ao salvar poster no Storage: {e}")
         await update.message.reply_text("❌ Falha crítica ao salvar a capa.")
-        # Limpa o estado se a capa falhar, para evitar uploads incompletos
         pending_movies.pop(chat_id, None) 
         return
 
@@ -241,7 +238,7 @@ def start_polling():
     
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # 🚨 Handler 1: Filtro Relaxado: Aceita QUALQUER MENSAGEM com Legenda
+    # Handler 1: Filtro Relaxado: Aceita QUALQUER MENSAGEM com Legenda
     app.add_handler(
         MessageHandler(filters.ALL & filters.Caption, handle_photo) 
     )
