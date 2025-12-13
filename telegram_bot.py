@@ -44,7 +44,8 @@ if not firebase_admin._apps:
         },
     )
 
-bucket = storage.bucket()
+bucket = storage.bucket(FIREBASE_STORAGE_BUCKET)
+
 
 # =========================
 # MEMÓRIA TEMPORÁRIA
@@ -219,3 +220,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
