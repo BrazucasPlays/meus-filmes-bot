@@ -1,13 +1,11 @@
 import os
-import tempfile
 import time
+import tempfile
 import urllib.parse
-import asyncio
-
 from dotenv import load_dotenv
+
 from telegram import Update
 from telegram.ext import (
-    Application,
     ApplicationBuilder,
     MessageHandler,
     ContextTypes,
@@ -28,13 +26,12 @@ FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET")
 ALLOWED_CHAT_ID = os.getenv("TELEGRAM_GROUP_ID")
 
 if not BOT_TOKEN:
-    raise RuntimeError("Defina TELEGRAM_BOT_TOKEN no Render (Environment Variables)")
+    raise RuntimeError("TELEGRAM_BOT_TOKEN não definido")
 
 # --------------------
-# FIREBASE
+# Firebase
 # --------------------
 cred = credentials.Certificate("firebase-key.json")
-
 firebase_admin.initialize_app(
     cred,
     {
@@ -45,25 +42,24 @@ firebase_admin.initialize_app(
 
 bucket = storage.bucket()
 
-# --------------------
-# MEMÓRIA
-# --------------------
 pending_movies = {}
 
 # --------------------
-# HELPERS
+# Helpers
 # --------------------
 def build_download_url(blob):
     path = urllib.parse.quote(blob.name, safe="")
     return f"https://firebasestorage.googleapis.com/v0/b/{bucket.name}/o/{path}?alt=media"
+
 
 def check_chat(update: Update):
     if not ALLOWED_CHAT_ID:
         return True
     return str(update.effective_chat.id) == str(ALLOWED_CHAT_ID)
 
+
 # --------------------
-# HANDLERS
+# Handlers
 # --------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_chat(update):
@@ -73,67 +69,71 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
 
     pending_movies[chat_id] = {
-        "poster_file_id": photo.file_id,
-        "created_at": time.time(),
+        "poster": photo.file_id,
+        "time": time.time(),
     }
 
     await update.message.reply_text("✅ Capa recebida. Envie agora o TEXTO do filme.")
+
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_chat(update):
         return
 
-    text = update.message.text.lower()
-    if "título" not in text and "titulo" not in text:
+    chat_id = update.effective_chat.id
+    text = update.message.text
+
+    if "título" not in text.lower() and "titulo" not in text.lower():
         return
 
-    chat_id = update.effective_chat.id
-    pending_movies.setdefault(chat_id, {})["metadata"] = update.message.text
-
+    pending_movies.setdefault(chat_id, {})["text"] = text
     await update.message.reply_text("📝 Texto recebido. Agora envie o VÍDEO.")
+
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_chat(update):
         return
 
     chat_id = update.effective_chat.id
-    pending = pending_movies.get(chat_id)
+    data = pending_movies.get(chat_id)
 
-    if not pending:
-        await update.message.reply_text("⚠️ Envie CAPA → TEXTO → VÍDEO")
+    if not data or "poster" not in data or "text" not in data:
+        await update.message.reply_text("⚠️ Envie: capa → texto → vídeo.")
         return
 
     file = update.message.video or update.message.document
-    tg_file = await file.get_file()
-
-    await update.message.reply_text("⬆️ Enviando para Firebase...")
+    tg_file = await context.bot.get_file(file.file_id)
 
     movie_ref = db.reference("movies").push()
     movie_id = movie_ref.key
 
-    # POSTER
-    poster = await context.bot.get_file(pending["poster_file_id"])
-    with tempfile.NamedTemporaryFile(suffix=".jpg") as p:
-        await poster.download_to_drive(p.name)
-        poster_blob = bucket.blob(f"movies/{movie_id}/poster.jpg")
-        poster_blob.upload_from_filename(p.name)
+    # Poster
+    poster_file = await context.bot.get_file(data["poster"])
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        await poster_file.download_to_drive(tmp.name)
+        blob = bucket.blob(f"movies/{movie_id}/poster.jpg")
+        blob.upload_from_filename(tmp.name)
+    poster_url = build_download_url(blob)
 
-    # VIDEO
-    with tempfile.NamedTemporaryFile(suffix=".mp4") as v:
-        await tg_file.download_to_drive(v.name)
-        video_blob = bucket.blob(f"movies/{movie_id}/video.mp4")
-        video_blob.upload_from_filename(v.name)
+    # Video
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        await tg_file.download_to_drive(tmp.name)
+        vblob = bucket.blob(f"movies/{movie_id}/video.mp4")
+        vblob.upload_from_filename(tmp.name)
+    video_url = build_download_url(vblob)
 
-    movie_ref.set({
-        "title": pending["metadata"],
-        "posterUrl": build_download_url(poster_blob),
-        "videoUrl": build_download_url(video_blob),
-        "createdAt": int(time.time() * 1000),
-    })
+    movie_ref.set(
+        {
+            "title": "Filme",
+            "posterUrl": poster_url,
+            "videoUrl": video_url,
+            "createdAt": int(time.time() * 1000),
+        }
+    )
 
     pending_movies.pop(chat_id, None)
+    await update.message.reply_text("🎉 Filme salvo no Firebase com sucesso!")
 
-    await update.message.reply_text("🎬 Filme salvo com sucesso!")
 
 # --------------------
 # MAIN
@@ -143,10 +143,13 @@ def main():
 
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
+    app.add_handler(
+        MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video)
+    )
 
-    print("🤖 Bot online 24h")
+    print("🤖 Bot online 24h...")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
