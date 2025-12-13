@@ -23,6 +23,7 @@ from firebase_admin import credentials, db, storage
 # ======================================================
 # ENV & INIT
 # ======================================================
+# Carrega variáveis de ambiente
 load_dotenv()
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -56,11 +57,13 @@ movies_ref = db.reference("movies")
 
 # ======================================================
 # FLASK (Keep-Alive para Render Free)
+# Variável global app_flask é usada pelo Gunicorn
 # ======================================================
 app_flask = Flask(__name__)
 
 @app_flask.route("/")
 def home():
+    # Mensagem de saúde para o ping do Render
     return "🤖 Bot online 24h", 200
 
 # ======================================================
@@ -128,8 +131,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1] if update.message.photo else None
     document_image = update.message.document if update.message.document and update.message.document.mime_type.startswith('image') else None
     
-    # Se não houver nenhum tipo de imagem (e sim apenas texto na legenda, por ex.), o bot para aqui
-    # Este filtro só é acionado se houver uma legenda, então a foto deve ser verificada aqui.
+    # Se não houver nenhum tipo de imagem, retorna. O filtro já garante a legenda.
     if not photo and not document_image:
         return 
 
@@ -201,7 +203,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"❌ Erro ao salvar poster no Storage: {e}")
         await update.message.reply_text("❌ Falha crítica ao salvar a capa.")
-        # Limpa o filme pendente após falha crítica
         pending_movies.pop(chat_id, None) 
         return
 
@@ -220,7 +221,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"❌ Erro ao salvar vídeo no Storage: {e}")
         await update.message.reply_text("❌ Falha crítica ao salvar o vídeo.")
-        # Limpa o filme pendente após falha crítica
         pending_movies.pop(chat_id, None)
         return
 
@@ -266,7 +266,7 @@ def start_polling():
         asyncio.set_event_loop(loop)
     except Exception as e:
         print(f"ERRO CRÍTICO ao configurar asyncio: {e}")
-        is_bot_running = False # Resetar o flag em caso de falha inicial
+        is_bot_running = False
         return
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -286,17 +286,16 @@ def start_polling():
     # run_polling é síncrono e BLOQUEIA esta thread.
     app.run_polling(drop_pending_updates=True, stop_signals=None) 
     
-    # Se o run_polling sair (o que não deve acontecer no Render), resetamos o flag:
     is_bot_running = False 
 
 
 # ======================================================
-# MAIN
+# STARTUP DE THREAD ÚNICA (Ponto de entrada para o Gunicorn)
 # ======================================================
-if __name__ == "__main__":
-    # 1. Inicia o Bot em uma thread separada (com a verificação de flag)
-    threading.Thread(target=start_polling, daemon=True).start()
-    
-    # 2. Inicia o Flask na thread principal para satisfazer o Render.
-    port = int(os.environ.get("PORT", 10000))
-    app_flask.run(host="0.0.0.0", port=port)
+# Chamamos o polling na thread uma única vez na inicialização do arquivo
+# O Gunicorn (ou o Render) executa este código uma vez ao carregar o módulo.
+threading.Thread(target=start_polling, daemon=True).start()
+
+# IMPORTANTE: A variável 'app_flask' está disponível globalmente para ser usada pelo Gunicorn.
+# Comando de Início (Start Command) no Render deve ser:
+# gunicorn --bind 0.0.0.0:$PORT telegram_bot:app_flask
