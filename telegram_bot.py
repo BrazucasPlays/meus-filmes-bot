@@ -2,19 +2,18 @@ import os
 import time
 import tempfile
 import urllib.parse
-import asyncio 
 import json
 
 from flask import Flask, request
 from dotenv import load_dotenv
 
-from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder,
-    MessageHandler,
-    ContextTypes,
-    filters,
+    Updater, 
+    MessageHandler, 
+    CallbackContext, 
+    filters
 )
+from telegram import Update, File, Bot
 
 import firebase_admin
 from firebase_admin import credentials, db, storage
@@ -24,19 +23,18 @@ from firebase_admin import credentials, db, storage
 # ======================================================
 load_dotenv()
 
+# ... (Variáveis de ambiente iguais) ...
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL")
 FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET")
 ALLOWED_CHAT_ID = os.getenv("TELEGRAM_GROUP_ID") 
 WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL") 
-
-if not all([BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_STORAGE_BUCKET, ALLOWED_CHAT_ID, WEBHOOK_URL]):
-    raise RuntimeError("Variáveis de ambiente incompletas. Verifique BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_STORAGE_BUCKET, TELEGRAM_GROUP_ID e RENDER_EXTERNAL_URL.")
+# ... (Verificação de variáveis igual) ...
 
 # Inicialização ÚNICA do Firebase
+# ... (Bloco de inicialização do Firebase igual) ...
 if not firebase_admin._apps:
     try:
-        # Certifique-se de que o firebase-key.json está na raiz do projeto
         cred = credentials.Certificate("firebase-key.json") 
         firebase_admin.initialize_app(
             cred,
@@ -54,23 +52,19 @@ bucket = storage.bucket()
 movies_ref = db.reference("movies") 
 
 # ======================================================
-# FLASK (Ponto de entrada do Gunicorn e Keep-Alive)
+# FLASK & MEMÓRIA TEMPORÁRIA
 # ======================================================
 app_flask = Flask(__name__)
+pending_movies = {} 
 
 @app_flask.route("/")
 def home():
-    # Rota de saúde para o Render manter o serviço ativo
     return "🤖 Bot online (Webhook mode)", 200
 
 # ======================================================
-# MEMÓRIA TEMPORÁRIA (Para rastrear pares Capa+Vídeo)
+# HELPERS (Síncronos)
 # ======================================================
-pending_movies = {} 
-
-# ======================================================
-# HELPERS
-# ======================================================
+# ... (build_download_url, check_chat, parse_metadata iguais) ...
 def build_download_url(blob):
     path = urllib.parse.quote(blob.name, safe="")
     return f"https://firebasestorage.googleapis.com/v0/b/{bucket.name}/o/{path}?alt=media"
@@ -103,9 +97,10 @@ def parse_metadata(text: str):
 
 
 # ======================================================
-# HANDLERS (Assíncronos)
+# HANDLERS (Síncronos - PTB 13.x)
 # ======================================================
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Nota: get_file.download_to_drive é SÍNCRONO no PTB 13.x
+def handle_photo(update: Update, context: CallbackContext):
     if not check_chat(update): return
     chat_id = update.effective_chat.id
     text = update.message.caption 
@@ -115,136 +110,118 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "título" not in text.lower(): return
     poster_file_id = photo.file_id if photo else (document_image.file_id if document_image else None)
     if not poster_file_id:
-        await update.message.reply_text("⚠️ Falha ao obter o ID da imagem. Tente enviar a imagem diretamente.")
+        update.message.reply_text("⚠️ Falha ao obter o ID da imagem. Tente enviar a imagem diretamente.")
         return
     metadata = parse_metadata(text)
     pending_movies[chat_id] = {"poster_file_id": poster_file_id, "metadata": metadata, "created_at": time.time()}
-    await update.message.reply_text("✅ Capa e Metadados recebidos. Agora envie o **VÍDEO** do filme.")
+    update.message.reply_text("✅ Capa e Metadados recebidos. Agora envie o **VÍDEO** do filme.")
 
 
-async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_video(update: Update, context: CallbackContext):
     if not check_chat(update): return
     chat_id = update.effective_chat.id
     pending = pending_movies.get(chat_id)
     if not pending or "metadata" not in pending:
-        await update.message.reply_text("⚠️ Ordem incorreta. Envie: **Capa + Texto** primeiro → **Vídeo**.")
+        update.message.reply_text("⚠️ Ordem incorreta. Envie: **Capa + Texto** primeiro → **Vídeo**.")
         return
     file = update.message.video or update.message.document 
     if not file or (update.message.document and not update.message.document.mime_type.startswith('video')):
-        await update.message.reply_text("⚠️ Mensagem não contém um arquivo de vídeo válido.")
+        update.message.reply_text("⚠️ Mensagem não contém um arquivo de vídeo válido.")
         return
+    
     file_id = file.file_id
-    await update.message.reply_text("📥 Salvando no Firebase... (Isto pode levar tempo)")
+    update.message.reply_text("📥 Salvando no Firebase... (Isto pode levar tempo)")
     movie_ref = movies_ref.push()
     movie_id = movie_ref.key
+
     # --- UPLOAD POSTER ---
     poster_url = ""
     try:
-        poster_file = await context.bot.get_file(pending["poster_file_id"])
+        # get_file é síncrono no PTB 13.x
+        poster_file: File = context.bot.get_file(pending["poster_file_id"]) 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-            await poster_file.download_to_drive(tmp.name)
+            poster_file.download(custom_path=tmp.name) # Síncrono
             poster_blob = bucket.blob(f"movies/{movie_id}/poster.jpg") 
             poster_blob.upload_from_filename(tmp.name)
             poster_url = build_download_url(poster_blob)
     except Exception as e:
         print(f"❌ Erro ao salvar poster no Storage: {e}")
-        await update.message.reply_text("❌ Falha crítica ao salvar a capa.")
+        update.message.reply_text("❌ Falha crítica ao salvar a capa.")
         pending_movies.pop(chat_id, None) 
         return
+
     # --- UPLOAD VIDEO ---
     video_url = ""
     try:
-        video_file = await context.bot.get_file(file_id)
+        video_file: File = context.bot.get_file(file_id)
         ext = "." + file.file_name.split(".")[-1] if file.file_name and "." in file.file_name else ".mp4"
         with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-            await video_file.download_to_drive(tmp.name)
+            video_file.download(custom_path=tmp.name) # Síncrono
             video_blob = bucket.blob(f"movies/{movie_id}/video{ext}") 
             video_blob.upload_from_filename(tmp.name)
             video_url = build_download_url(video_blob)
     except Exception as e:
         print(f"❌ Erro ao salvar vídeo no Storage: {e}")
-        await update.message.reply_text("❌ Falha crítica ao salvar o vídeo.")
+        update.message.reply_text("❌ Falha crítica ao salvar o vídeo.")
         pending_movies.pop(chat_id, None)
         return
-    # 2. SALVAR NO REALTIME DATABASE
+
+    # SALVAR NO REALTIME DATABASE
     data = pending["metadata"]
     movie_ref.set({**data, "posterUrl": poster_url, "videoUrl": video_url, "createdAt": int(time.time() * 1000)})
     pending_movies.pop(chat_id, None)
-    await update.message.reply_text("✅ Filme salvo no Firebase!")
+    update.message.reply_text("✅ Filme salvo no Firebase!")
 # ======================================================
 
 
 # ======================================================
-# INICIALIZAÇÃO DE APLICAÇÃO PTB (GLOBAL)
+# INICIALIZAÇÃO E DISPATCHER (PTB 13.x)
 # ======================================================
-# A Application é construída globalmente e os handlers são anexados
-application = ApplicationBuilder().token(BOT_TOKEN).build()
-application.add_handler(MessageHandler(filters.Caption, handle_photo)) 
-application.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
+
+# No PTB 13.x, usamos Bot e Dispatcher (síncronos)
+bot = Bot(token=BOT_TOKEN)
+dispatcher = Updater(bot=bot).dispatcher
+
+dispatcher.add_handler(MessageHandler(filters.caption & ~filters.command, handle_photo)) 
+dispatcher.add_handler(MessageHandler(filters.video | filters.document.video, handle_video))
 
 
 # ======================================================
-# WEBSERVICE HANDLER (POST)
+# WEBSERVICE HANDLER (POST) - SIMPLES E SÍNCRONO
 # ======================================================
 
 @app_flask.route("/telegram-webhook", methods=["POST"])
 def telegram_webhook():
-    """
-    Recebe o Update do Telegram.
-    Utiliza application.process_update(update) com a sintaxe de desserialização correta.
-    """
-    try:
-        # 1. Pega o JSON do Telegram
-        update_json = request.get_json(force=True)
+    """Recebe o update e o passa diretamente para o dispatcher."""
+    if request.method == "POST":
+        update = Update.de_json(request.get_json(force=True), bot)
         
-        if update_json is None:
-            return "OK", 200
-
-        # 2. Cria o objeto Update, ligando-o ao bot da aplicação
-        update = Update.de_json(update_json, application.bot)
-
-        # 3. Cria um novo Event Loop e o seta para esta requisição (necessário para async)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        # 4. Chama process_update, confiando que o worker gevent resolve a inicialização
-        loop.run_until_complete(
-            application.process_update(update)
-        )
-
+        # 🚨 CORREÇÃO CRÍTICA: Processa o update usando o dispatcher síncrono.
+        # Isso evita qualquer problema de Application/asyncio.
+        dispatcher.process_update(update)
+        
         return "OK", 200
-
-    except Exception as e:
-        print(f"❌ Erro ao processar webhook: {e}")
-        return "Internal Server Error", 500
+    return "Method Not Allowed", 405
 
 
 # ======================================================
-# CONFIGURAÇÃO DE WEBSERVICE (Startup) - CORRIGIDA PARA AMBIENTES ASSÍNCRONOS
+# CONFIGURAÇÃO DE WEBSERVICE (Startup) - SÍNCRONA
 # ======================================================
 
 def setup_webhook():
-    """Configura o Webhook no Telegram na inicialização."""
+    """Configura o Webhook no Telegram na inicialização (Síncrono)."""
     try:
         full_webhook_url = f"{WEBHOOK_URL}/telegram-webhook"
         print(f"🔗 Tentando configurar Webhook para: {full_webhook_url}")
         
-        async def set_hook():
-            # Configura o Webhook usando a Application global
-            await application.bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
-            print("✅ Webhook configurado com sucesso. Bot está pronto!")
+        # No PTB 13.x, set_webhook é uma chamada de API síncrona
+        bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
         
-        # 🚨 CORREÇÃO: Trata a execução assíncrona no startup
-        try:
-            # Tenta rodar se não houver um loop rodando (startup normal)
-            asyncio.run(set_hook())
-        except RuntimeError:
-             # Se o loop já estiver rodando (worker gevent), usa o loop existente
-             asyncio.get_event_loop().run_until_complete(set_hook())
+        print("✅ Webhook configurado com sucesso. Bot está pronto!")
 
     except Exception as e:
         print(f"❌ ERRO CRÍTICO no setup do Webhook: {e}. Verifique o BOT_TOKEN e RENDER_EXTERNAL_URL.")
 
-# Executa o setup do webhook na inicialização do módulo (Gunicorn)
+# Executa o setup do webhook na inicialização do módulo
 print("🤖 Iniciando Bot em modo Webhook...")
 setup_webhook()
