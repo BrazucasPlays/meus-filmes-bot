@@ -184,14 +184,14 @@ application.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, h
 
 
 # ======================================================
-# WEBSERVICE HANDLER (POST) - CORREÇÃO FINAL ESTÁVEL
+# WEBSERVICE HANDLER (POST)
 # ======================================================
 
 @app_flask.route("/telegram-webhook", methods=["POST"])
 def telegram_webhook():
     """
     Recebe o Update do Telegram.
-    Utiliza Update.de_json e application.process_update para estabilidade.
+    Utiliza application.process_update(update) com a sintaxe de desserialização correta.
     """
     try:
         # 1. Pega o JSON do Telegram
@@ -207,7 +207,7 @@ def telegram_webhook():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-        # 4. Chama process_update para processar o update assincronamente
+        # 4. Chama process_update, confiando que o worker gevent resolve a inicialização
         loop.run_until_complete(
             application.process_update(update)
         )
@@ -220,7 +220,7 @@ def telegram_webhook():
 
 
 # ======================================================
-# CONFIGURAÇÃO DE WEBSERVICE (Startup)
+# CONFIGURAÇÃO DE WEBSERVICE (Startup) - CORRIGIDA PARA AMBIENTES ASSÍNCRONOS
 # ======================================================
 
 def setup_webhook():
@@ -234,8 +234,13 @@ def setup_webhook():
             await application.bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
             print("✅ Webhook configurado com sucesso. Bot está pronto!")
         
-        loop = asyncio.new_event_loop()
-        loop.run_until_complete(set_hook())
+        # 🚨 CORREÇÃO: Trata a execução assíncrona no startup
+        try:
+            # Tenta rodar se não houver um loop rodando (startup normal)
+            asyncio.run(set_hook())
+        except RuntimeError:
+             # Se o loop já estiver rodando (worker gevent), usa o loop existente
+             asyncio.get_event_loop().run_until_complete(set_hook())
 
     except Exception as e:
         print(f"❌ ERRO CRÍTICO no setup do Webhook: {e}. Verifique o BOT_TOKEN e RENDER_EXTERNAL_URL.")
