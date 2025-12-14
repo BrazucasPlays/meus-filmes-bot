@@ -182,14 +182,14 @@ application.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, h
 
 
 # ======================================================
-# WEBSERVICE HANDLER (POST) - CORREÇÃO FINAL (handle_update)
+# WEBSERVICE HANDLER (POST) - CORREÇÃO FINAL ESTÁVEL
 # ======================================================
 
 @app_flask.route("/telegram-webhook", methods=["POST"])
 def telegram_webhook():
     """
     Recebe o Update do Telegram.
-    Usa application.handle_update(update) para Thread-Safety e Inicialização.
+    Usa application.process_update(update) com a sintaxe de desserialização correta.
     """
     try:
         # 1. Pega o JSON do Telegram
@@ -199,16 +199,16 @@ def telegram_webhook():
             return "OK", 200
 
         # 2. Cria o objeto Update
+        # Esta é a sintaxe mais estável para o PTB 20.x com Webhook.
         update = Update.de_json(update_json, application.bot)
 
         # 3. Cria um novo Event Loop e o seta para esta requisição
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-        # 4. 🚨 MÉTODO FINAL: handle_update para processar o objeto Update
-        # Ele lida com o contexto de inicialização dentro do worker de forma segura.
+        # 4. Chama process_update, que é o nome do método em versões mais antigas do PTB 20
         loop.run_until_complete(
-            application.handle_update(update)
+            application.process_update(update)
         )
 
         return "OK", 200
@@ -229,6 +229,7 @@ def setup_webhook():
         print(f"🔗 Tentando configurar Webhook para: {full_webhook_url}")
         
         async def set_hook():
+            # Usa a Application GLOBAL aqui
             await application.bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
             print("✅ Webhook configurado com sucesso. Bot está pronto!")
         
