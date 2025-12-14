@@ -36,6 +36,7 @@ if not all([BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_STORAGE_BUCKET, ALLOWED_CHAT_ID
 # Inicialização ÚNICA do Firebase
 if not firebase_admin._apps:
     try:
+        # Certifique-se de que o firebase-key.json está na raiz do projeto
         cred = credentials.Certificate("firebase-key.json") 
         firebase_admin.initialize_app(
             cred,
@@ -59,10 +60,11 @@ app_flask = Flask(__name__)
 
 @app_flask.route("/")
 def home():
+    # Rota de saúde para o Render manter o serviço ativo
     return "🤖 Bot online (Webhook mode)", 200
 
 # ======================================================
-# MEMÓRIA TEMPORÁRIA
+# MEMÓRIA TEMPORÁRIA (Para rastrear pares Capa+Vídeo)
 # ======================================================
 pending_movies = {} 
 
@@ -101,7 +103,7 @@ def parse_metadata(text: str):
 
 
 # ======================================================
-# HANDLERS
+# HANDLERS (Assíncronos)
 # ======================================================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_chat(update): return
@@ -175,7 +177,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ======================================================
 # INICIALIZAÇÃO DE APLICAÇÃO PTB (GLOBAL)
 # ======================================================
-
+# A Application é construída globalmente e os handlers são anexados
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 application.add_handler(MessageHandler(filters.Caption, handle_photo)) 
 application.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
@@ -189,7 +191,7 @@ application.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, h
 def telegram_webhook():
     """
     Recebe o Update do Telegram.
-    Usa application.process_update(update) com a sintaxe de desserialização correta.
+    Utiliza Update.de_json e application.process_update para estabilidade.
     """
     try:
         # 1. Pega o JSON do Telegram
@@ -198,15 +200,14 @@ def telegram_webhook():
         if update_json is None:
             return "OK", 200
 
-        # 2. Cria o objeto Update
-        # Esta é a sintaxe mais estável para o PTB 20.x com Webhook.
+        # 2. Cria o objeto Update, ligando-o ao bot da aplicação
         update = Update.de_json(update_json, application.bot)
 
-        # 3. Cria um novo Event Loop e o seta para esta requisição
+        # 3. Cria um novo Event Loop e o seta para esta requisição (necessário para async)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-        # 4. Chama process_update, que é o nome do método em versões mais antigas do PTB 20
+        # 4. Chama process_update para processar o update assincronamente
         loop.run_until_complete(
             application.process_update(update)
         )
@@ -229,7 +230,7 @@ def setup_webhook():
         print(f"🔗 Tentando configurar Webhook para: {full_webhook_url}")
         
         async def set_hook():
-            # Usa a Application GLOBAL aqui
+            # Configura o Webhook usando a Application global
             await application.bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
             print("✅ Webhook configurado com sucesso. Bot está pronto!")
         
