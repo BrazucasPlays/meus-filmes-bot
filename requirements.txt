@@ -3,4 +3,4 @@ firebase-admin
 python-dotenv
 flask
 gunicorn
-gevent
+eventlet 
