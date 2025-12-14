@@ -3,4 +3,5 @@ firebase-admin
 python-dotenv
 flask
 gunicorn
+uvicorn
 
