@@ -1,6 +1,5 @@
-python-telegram-bot==20.3
+python-telegram-bot==13.15  
 firebase-admin
 python-dotenv
 flask
 gunicorn
-eventlet 
